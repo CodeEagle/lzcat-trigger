@@ -252,12 +252,8 @@ jobs:
           mkdir -p ~/.ssh
           echo "$DEPLOY_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
-          
-          echo "Host github.com" >> ~/.ssh/config
-          echo "    Hostname ssh.github.com" >> ~/.ssh/config
-          echo "    Port 443" >> ~/.ssh/config
-          echo "    User git" >> ~/.ssh/config
-          echo "    StrictHostKeyChecking no" >> ~/.ssh/config
-          
+
+          printf 'Host github.com\n  Hostname ssh.github.com\n  Port 443\n  User git\n  StrictHostKeyChecking no\n' >> ~/.ssh/config
+
           git remote set-url origin git@github.com:{{GITHUB_USER}}/{{PROJECT_NAME}}.git
           git push
