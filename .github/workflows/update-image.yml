@@ -155,14 +155,12 @@ jobs:
             # 创建 Dockerfile
             case "${{ env.DOCKERFILE_TYPE }}" in
               "simple")
-                cat > Dockerfile << 'DOCKERFILE'
-          FROM debian:bookworm-slim
-          RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
-          COPY ${{ env.PROJECT_NAME_LOWER }} /usr/local/bin/${{ env.PROJECT_NAME_LOWER }}
-          RUN chmod +x /usr/local/bin/${{ env.PROJECT_NAME_LOWER }}
-          EXPOSE ${{ env.SERVICE_PORT }}
-          CMD ${{ env.SERVICE_CMD }}
-          DOCKERFILE
+                echo 'FROM debian:bookworm-slim' > Dockerfile
+                echo 'RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*' >> Dockerfile
+                echo 'COPY ${{ env.PROJECT_NAME_LOWER }} /usr/local/bin/${{ env.PROJECT_NAME_LOWER }}' >> Dockerfile
+                echo 'RUN chmod +x /usr/local/bin/${{ env.PROJECT_NAME_LOWER }}' >> Dockerfile
+                echo 'EXPOSE ${{ env.SERVICE_PORT }}' >> Dockerfile
+                echo 'CMD ${{ env.SERVICE_CMD }}' >> Dockerfile
                 ;;
               *)
                 # 自定义 Dockerfile 应在项目根目录提供
@@ -255,13 +253,11 @@ jobs:
           echo "$DEPLOY_KEY" > ~/.ssh/id_ed25519
           chmod 600 ~/.ssh/id_ed25519
           
-          cat >> ~/.ssh/config << 'SSHEOF'
-          Host github.com
-              Hostname ssh.github.com
-              Port 443
-              User git
-              StrictHostKeyChecking no
-          SSHEOF
+          echo "Host github.com" >> ~/.ssh/config
+          echo "    Hostname ssh.github.com" >> ~/.ssh/config
+          echo "    Port 443" >> ~/.ssh/config
+          echo "    User git" >> ~/.ssh/config
+          echo "    StrictHostKeyChecking no" >> ~/.ssh/config
           
           git remote set-url origin git@github.com:{{GITHUB_USER}}/{{PROJECT_NAME}}.git
           git push
