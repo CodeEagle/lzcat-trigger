@@ -1,0 +1,26 @@
+name: Test LZC CLI Token
+
+on:
+  workflow_dispatch:
+
+jobs:
+  test-token:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install lzc-cli
+        run: npm install -g @lazycatcloud/lzc-cli
+
+      - name: Test token - list my images
+        env:
+          LZC_CLI_TOKEN: ${{ secrets.LZC_CLI_TOKEN }}
+        run: |
+          echo "Testing lzc-cli appstore token..."
+          lzc-cli appstore my-images

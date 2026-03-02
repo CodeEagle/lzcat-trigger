@@ -1,0 +1,267 @@
+name: Update {{PROJECT_NAME}} Image
+
+on:
+  # 手动触发
+  workflow_dispatch:
+    inputs:
+      force_build:
+        description: 'Force build even if no new version'
+        required: false
+        default: 'false'
+        type: boolean
+  # 定时检查，每6小时一次
+  schedule:
+    - cron: '0 */6 * * *'
+
+# ==================== 配置区域 ====================
+# 以下变量需要根据项目实际情况修改
+env:
+  # 上游仓库信息
+  UPSTREAM_REPO: {{UPSTREAM_REPO}}              # 例如: RightNow-AI/openfang
+  PROJECT_NAME: {{PROJECT_NAME}}                # 例如: OpenFang
+  PROJECT_NAME_LOWER: {{PROJECT_NAME_LOWER}}    # 例如: openfang
+  
+  # 镜像配置
+  # 官方镜像地址（如 ghcr.io/xxx/app），留空表示无官方镜像
+  OFFICIAL_IMAGE_REGISTRY: {{OFFICIAL_IMAGE_REGISTRY}}  # 例如: ghcr.io/rightnow-ai/openfang 或留空
+  
+  # 预编译二进制配置（当无官方镜像时使用）
+  # 二进制下载 URL 模板，支持 $LATEST_VERSION 变量
+  PRECOMPILED_BINARY_URL: {{PRECOMPILED_BINARY_URL}}
+  # 示例: https://github.com/RightNow-AI/openfang/releases/download/v$LATEST_VERSION/openfang-x86_64-unknown-linux-gnu.tar.gz
+  
+  # Dockerfile 类型: simple(简单HTTP服务), custom(自定义，需提供 Dockerfile.template)
+  DOCKERFILE_TYPE: {{DOCKERFILE_TYPE}}          # 例如: simple
+  # 服务端口
+  SERVICE_PORT: {{SERVICE_PORT}}                # 例如: 4200
+  # 服务启动命令
+  SERVICE_CMD: {{SERVICE_CMD}}                  # 例如: ["openfang", "start"]
+# ==================== 配置区域结束 ====================
+
+jobs:
+  check-and-update:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Get latest package version
+        id: get-version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          LATEST_VERSION=$(gh api repos/${{ env.UPSTREAM_REPO }}/releases/latest --jq '.tag_name' 2>/dev/null || echo "")
+          
+          if [ -z "$LATEST_VERSION" ]; then
+            echo "No release found"
+            exit 1
+          fi
+          
+          LATEST_VERSION=${LATEST_VERSION#v}
+          
+          echo "latest_version=$LATEST_VERSION" >> $GITHUB_OUTPUT
+          echo "Latest version found: $LATEST_VERSION"
+
+      - name: Check if update needed
+        id: check-update
+        run: |
+          CURRENT_IMAGE=$(grep 'image:' lzc-manifest.yml | head -1 | awk '{print $2}')
+          echo "Current image: $CURRENT_IMAGE"
+          
+          LATEST_VERSION="${{ steps.get-version.outputs.latest_version }}"
+          FORCE_BUILD="${{ inputs.force_build }}"
+          
+          if [ "$FORCE_BUILD" = "true" ]; then
+            echo "update_needed=true" >> $GITHUB_OUTPUT
+            echo "Force build requested"
+          elif [ -n "$LATEST_VERSION" ] && [[ "$CURRENT_IMAGE" != *"$LATEST_VERSION"* ]]; then
+            echo "update_needed=true" >> $GITHUB_OUTPUT
+            echo "New version available: $LATEST_VERSION"
+          else
+            echo "update_needed=false" >> $GITHUB_OUTPUT
+            echo "Already on latest version"
+          fi
+
+      - name: Setup Node.js
+        if: steps.check-update.outputs.update_needed == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install lzc-cli
+        if: steps.check-update.outputs.update_needed == 'true'
+        run: npm install -g @lazycatcloud/lzc-cli
+
+      - name: Build and push image
+        if: steps.check-update.outputs.update_needed == 'true'
+        id: build-image
+        env:
+          LZC_CLI_TOKEN: ${{ secrets.LZC_CLI_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          LATEST_VERSION="${{ steps.get-version.outputs.latest_version }}"
+          
+          # 检查是否配置了官方镜像
+          if [ -n "${{ env.OFFICIAL_IMAGE_REGISTRY }}" ]; then
+            SOURCE_IMAGE="${{ env.OFFICIAL_IMAGE_REGISTRY }}:$LATEST_VERSION"
+            echo "Checking official image: $SOURCE_IMAGE"
+            
+            if docker manifest inspect "$SOURCE_IMAGE" 2>/dev/null; then
+              echo "Official image found, copying..."
+              COPY_OUTPUT=$(lzc-cli appstore copy-image "$SOURCE_IMAGE" 2>&1)
+              echo "$COPY_OUTPUT"
+              ACCELERATED_URL=$(echo "$COPY_OUTPUT" | grep -oE 'registry\.lazycat\.cloud/[a-zA-Z0-9_/.:-]+' | head -1 || echo "")
+              
+              if [ -n "$ACCELERATED_URL" ]; then
+                echo "accelerated_url=$ACCELERATED_URL" >> $GITHUB_OUTPUT
+                exit 0
+              fi
+            fi
+          fi
+          
+          # 无官方镜像或官方镜像不存在，尝试从预编译二进制构建
+          if [ -n "${{ env.PRECOMPILED_BINARY_URL }}" ]; then
+            echo "Building from precompiled binary..."
+            
+            # 检查是否已有构建好的镜像
+            EXISTING_IMAGE=$(lzc-cli appstore my-images 2>&1 | grep "$LATEST_VERSION" | grep -oE 'registry\.lazycat\.cloud/[a-zA-Z0-9_/.:-]+' | head -1 || echo "")
+            
+            if [ -n "$EXISTING_IMAGE" ]; then
+              echo "Found existing image: $EXISTING_IMAGE"
+              echo "accelerated_url=$EXISTING_IMAGE" >> $GITHUB_OUTPUT
+              exit 0
+            fi
+            
+            # 下载预编译二进制
+            BINARY_URL="${{ env.PRECOMPILED_BINARY_URL }}"
+            BINARY_URL="${BINARY_URL//\$LATEST_VERSION/$LATEST_VERSION}"
+            echo "Downloading binary from: $BINARY_URL"
+            
+            mkdir -p /tmp/build
+            cd /tmp/build
+            
+            if [[ "$BINARY_URL" == *.tar.gz ]] || [[ "$BINARY_URL" == *.tgz ]]; then
+              curl -sL "$BINARY_URL" | tar xz
+            elif [[ "$BINARY_URL" == *.zip ]]; then
+              curl -sL "$BINARY_URL" -o binary.zip
+              unzip binary.zip
+            else
+              curl -sL "$BINARY_URL" -o ${{ env.PROJECT_NAME_LOWER }}
+            fi
+            
+            # 创建 Dockerfile
+            case "${{ env.DOCKERFILE_TYPE }}" in
+              "simple")
+                cat > Dockerfile << 'DOCKERFILE'
+          FROM debian:bookworm-slim
+          RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*
+          COPY ${{ env.PROJECT_NAME_LOWER }} /usr/local/bin/${{ env.PROJECT_NAME_LOWER }}
+          RUN chmod +x /usr/local/bin/${{ env.PROJECT_NAME_LOWER }}
+          EXPOSE ${{ env.SERVICE_PORT }}
+          CMD ${{ env.SERVICE_CMD }}
+          DOCKERFILE
+                ;;
+              *)
+                # 自定义 Dockerfile 应在项目根目录提供
+                if [ -f "${{ github.workspace }}/Dockerfile.template" ]; then
+                  cp ${{ github.workspace }}/Dockerfile.template .
+                  sed -i "s/{{PROJECT_NAME_LOWER}}/${{ env.PROJECT_NAME_LOWER }}/g" Dockerfile
+                  sed -i "s/{{SERVICE_PORT}}/${{ env.SERVICE_PORT }}/g" Dockerfile
+                else
+                  echo "Error: DOCKERFILE_TYPE=custom but no Dockerfile.template found"
+                  exit 1
+                fi
+                ;;
+            esac
+            
+            # 构建并推送镜像
+            LOCAL_IMAGE="ghcr.io/${{ github.repository_owner }}/${{ env.PROJECT_NAME_LOWER }}:$LATEST_VERSION"
+            LOCAL_IMAGE=$(echo "$LOCAL_IMAGE" | tr '[:upper:]' '[:lower:]')
+            docker build -t "$LOCAL_IMAGE" .
+            
+            echo "$GITHUB_TOKEN" | docker login ghcr.io -u ${{ github.repository_owner }} --password-stdin
+            docker push "$LOCAL_IMAGE"
+            
+            # 复制到懒猫镜像源
+            COPY_OUTPUT=$(lzc-cli appstore copy-image "$LOCAL_IMAGE" 2>&1)
+            echo "$COPY_OUTPUT"
+            ACCELERATED_URL=$(echo "$COPY_OUTPUT" | grep -oE 'registry\.lazycat\.cloud/[a-zA-Z0-9_/.:-]+' | head -1 || echo "")
+            
+            if [ -z "$ACCELERATED_URL" ]; then
+              echo "Failed to get accelerated URL"
+              exit 1
+            fi
+            
+            echo "accelerated_url=$ACCELERATED_URL" >> $GITHUB_OUTPUT
+          else
+            echo "No official image configured and no precompiled binary URL set"
+            exit 1
+          fi
+
+      - name: Update manifest
+        if: steps.check-update.outputs.update_needed == 'true'
+        run: |
+          ACCELERATED_URL="${{ steps.build-image.outputs.accelerated_url }}"
+          LATEST_VERSION="${{ steps.get-version.outputs.latest_version }}"
+          
+          sed -i "s|image:.*|image: $ACCELERATED_URL|g" lzc-manifest.yml
+          sed -i "s/^version:.*/version: $LATEST_VERSION/g" lzc-manifest.yml
+          
+          echo "Updated to version: $LATEST_VERSION"
+          echo "Updated image: $ACCELERATED_URL"
+
+      - name: Build package
+        if: steps.check-update.outputs.update_needed == 'true'
+        env:
+          LZC_CLI_TOKEN: ${{ secrets.LZC_CLI_TOKEN }}
+        run: |
+          lzc-cli project build -o ${{ env.PROJECT_NAME_LOWER }}.lpk
+
+      - name: Publish to appstore
+        if: steps.check-update.outputs.update_needed == 'true'
+        env:
+          LZC_CLI_TOKEN: ${{ secrets.LZC_CLI_TOKEN }}
+        run: |
+          LATEST_VERSION="${{ steps.get-version.outputs.latest_version }}"
+          lzc-cli appstore publish ${{ env.PROJECT_NAME_LOWER }}.lpk --clang en -c "Auto update to ${{ env.PROJECT_NAME }} $LATEST_VERSION"
+
+      - name: Create GitHub Release
+        if: steps.check-update.outputs.update_needed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          LATEST_VERSION="${{ steps.get-version.outputs.latest_version }}"
+          echo "Auto update to ${{ env.PROJECT_NAME }} $LATEST_VERSION" > /tmp/changelog.txt
+          
+          gh release create "v$LATEST_VERSION" \
+            --title "${{ env.PROJECT_NAME }} v$LATEST_VERSION" \
+            --notes-file /tmp/changelog.txt \
+            ${{ env.PROJECT_NAME_LOWER }}.lpk
+
+      - name: Commit and push changes
+        if: steps.check-update.outputs.update_needed == 'true'
+        env:
+          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+        run: |
+          git config --local user.email "action@github.com"
+          git config --local user.name "GitHub Action"
+          git add lzc-manifest.yml
+          git commit -m "Update ${{ env.PROJECT_NAME }} to version ${{ steps.get-version.outputs.latest_version }}"
+          
+          mkdir -p ~/.ssh
+          echo "$DEPLOY_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          
+          cat >> ~/.ssh/config << 'SSHEOF'
+          Host github.com
+              Hostname ssh.github.com
+              Port 443
+              User git
+              StrictHostKeyChecking no
+          SSHEOF
+          
+          git remote set-url origin git@github.com:{{GITHUB_USER}}/{{PROJECT_NAME}}.git
+          git push
