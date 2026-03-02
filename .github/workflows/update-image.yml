@@ -233,7 +233,10 @@ jobs:
         run: |
           LATEST_VERSION="${{ steps.get-version.outputs.latest_version }}"
           echo "Auto update to ${{ env.PROJECT_NAME }} $LATEST_VERSION" > /tmp/changelog.txt
-          
+
+          # 如果 release 已存在则先删除
+          gh release delete "v$LATEST_VERSION" --yes 2>/dev/null || true
+
           gh release create "v$LATEST_VERSION" \
             --title "${{ env.PROJECT_NAME }} v$LATEST_VERSION" \
             --notes-file /tmp/changelog.txt \
