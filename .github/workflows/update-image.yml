@@ -14,6 +14,11 @@ on:
         required: false
         default: ''
         type: string
+      publish_to_store:
+        description: 'Publish to LazyCat App Store'
+        required: false
+        default: false
+        type: boolean
   # 定时检查，每6小时一次
   schedule:
     - cron: '0 */6 * * *'
@@ -255,8 +260,8 @@ jobs:
         run: |
           lzc-cli project build -o ${{ env.PROJECT_NAME_LOWER }}.lpk
 
-      - name: Publish to appstore
-        if: steps.check-update.outputs.update_needed == 'true'
+      - name: Publish to LazyCat App Store
+        if: steps.check-update.outputs.update_needed == 'true' && inputs.publish_to_store == true
         env:
           LZC_CLI_TOKEN: ${{ secrets.LZC_CLI_TOKEN }}
         run: |
@@ -277,7 +282,7 @@ jobs:
           gh release delete "v$LATEST_VERSION" --yes 2>/dev/null || true
 
           gh release create "v$LATEST_VERSION" \
-            --title "${{ env.PROJECT_NAME }} v$LATEST_VERSION" \
+            --title "v$LATEST_VERSION" \
             --notes-file /tmp/release_notes.txt \
             ${{ env.PROJECT_NAME_LOWER }}.lpk
 
