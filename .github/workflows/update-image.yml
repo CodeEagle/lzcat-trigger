@@ -289,24 +289,21 @@ jobs:
       - name: Commit and push changes
         if: steps.check-update.outputs.update_needed == 'true'
         env:
-          DEPLOY_KEY: ${{ secrets.DEPLOY_KEY }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
-          git config --local user.email "action@github.com"
-          git config --local user.name "GitHub Action"
-          git add lzc-manifest.yml
+          LATEST_VERSION="${{ steps.get-version.outputs.latest_version }}"
 
-          if git diff --staged --quiet; then
-            echo "No changes to commit"
-            exit 0
+          # 获取当前文件的 SHA
+          FILE_SHA=$(gh api repos/${{ github.repository }}/contents/lzc-manifest.yml --jq '.sha' 2>/dev/null || echo "")
+
+          if [ -z "$FILE_SHA" ]; then
+            echo "Failed to get file SHA"
+            exit 1
           fi
 
-          git commit -m "Update ${{ env.PROJECT_NAME }} to version ${{ steps.get-version.outputs.latest_version }}"
-
-          mkdir -p ~/.ssh
-          echo "$DEPLOY_KEY" > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
-
-          printf 'Host github.com\n  Hostname ssh.github.com\n  Port 443\n  User git\n  StrictHostKeyChecking no\n' >> ~/.ssh/config
-
-          git remote set-url origin git@github.com:{{GITHUB_USER}}/{{PROJECT_NAME}}.git
-          git push
+          # 使用 GitHub API 更新文件
+          gh api -X PUT repos/${{ github.repository }}/contents/lzc-manifest.yml \
+            -f message="Update ${{ env.PROJECT_NAME }} to version $LATEST_VERSION" \
+            -f content="$(base64 -w 0 lzc-manifest.yml)" \
+            -f sha="$FILE_SHA" \
+            -f branch="${{ github.ref_name }}"
