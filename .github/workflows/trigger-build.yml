@@ -236,6 +236,14 @@ jobs:
               ;;
           esac
 
+      - name: Login to ghcr.io
+        if: steps.check-update.outputs.update_needed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          OWNER=$(echo "${{ inputs.target_repo }}" | cut -d'/' -f1 | tr '[:upper:]' '[:lower:]')
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$OWNER" --password-stdin
+
       - name: Copy image to LazyCat registry
         if: steps.check-update.outputs.update_needed == 'true'
         id: copy-image
