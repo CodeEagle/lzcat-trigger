@@ -1,5 +1,5 @@
 lzc-sdk-version: '0.1'
-package: com.selfstudio.{{PROJECT_NAME_LOWER}}
+package: fun.selfstudio.app.migration.{{PROJECT_NAME_LOWER}}
 version: {{VERSION}}
 min_os_version: 1.3.8
 name: {{PROJECT_NAME}}
