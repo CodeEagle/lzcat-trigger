@@ -65,30 +65,29 @@ jobs:
         run: |
           TARGET_VERSION="${{ inputs.target_version }}"
           LATEST_VERSION=""
+          RELEASE_NOTES=""
 
           if [ -n "$TARGET_VERSION" ]; then
             # 使用指定版本
             LATEST_VERSION="$TARGET_VERSION"
             echo "Using specified version: $LATEST_VERSION"
-            RELEASE_DATA=$(gh api "repos/${{ env.UPSTREAM_REPO }}/releases/tags/v$LATEST_VERSION" 2>/dev/null || echo "")
-            if [ -n "$RELEASE_DATA" ]; then
-              RELEASE_NOTES=$(echo "$RELEASE_DATA" | jq -r '.body')
-            else
-              RELEASE_NOTES="Build version $LATEST_VERSION"
-            fi
           else
             # 1. 尝试获取最新 release
-            RELEASE_TAG=$(gh api repos/${{ env.UPSTREAM_REPO }}/releases/latest --jq '.tag_name' 2>/dev/null || echo "")
-            if [ -n "$RELEASE_TAG" ] && [ "$RELEASE_TAG" != "null" ] && [ "$RELEASE_TAG" != "" ]; then
+            echo "Checking for latest release..."
+            RELEASE_RESPONSE=$(gh api "repos/${{ env.UPSTREAM_REPO }}/releases/latest" 2>&1 || true)
+            if echo "$RELEASE_RESPONSE" | jq -e '.tag_name' >/dev/null 2>&1; then
+              RELEASE_TAG=$(echo "$RELEASE_RESPONSE" | jq -r '.tag_name')
               LATEST_VERSION="${RELEASE_TAG#v}"
-              RELEASE_NOTES=$(gh api repos/${{ env.UPSTREAM_REPO }}/releases/latest --jq '.body' 2>/dev/null || echo "Build from release $RELEASE_TAG")
+              RELEASE_NOTES=$(echo "$RELEASE_RESPONSE" | jq -r '.body // empty')
               echo "Found release version: $LATEST_VERSION"
             fi
 
             # 2. 尝试获取最新 tag
             if [ -z "$LATEST_VERSION" ]; then
-              LATEST_TAG=$(gh api repos/${{ env.UPSTREAM_REPO }}/tags --jq '.[0].name' 2>/dev/null || echo "")
-              if [ -n "$LATEST_TAG" ] && [ "$LATEST_TAG" != "null" ] && [ "$LATEST_TAG" != "" ]; then
+              echo "Checking for latest tag..."
+              TAGS_RESPONSE=$(gh api "repos/${{ env.UPSTREAM_REPO }}/tags?per_page=1" 2>&1 || true)
+              if echo "$TAGS_RESPONSE" | jq -e '.[0].name' >/dev/null 2>&1; then
+                LATEST_TAG=$(echo "$TAGS_RESPONSE" | jq -r '.[0].name')
                 LATEST_VERSION="${LATEST_TAG#v}"
                 RELEASE_NOTES="Build from tag $LATEST_TAG"
                 echo "Found tag version: $LATEST_VERSION"
@@ -97,20 +96,23 @@ jobs:
 
             # 3. 尝试从 CHANGELOG 解析版本
             if [ -z "$LATEST_VERSION" ]; then
+              echo "Checking CHANGELOG..."
               for changelog_file in "CHANGELOG.md" "CHANGELOG" "changelog.md" "HISTORY.md"; do
-                CHANGELOG_CONTENT=$(gh api "repos/${{ env.UPSTREAM_REPO }}/contents/$changelog_file" --jq '.content' 2>/dev/null | base64 -d 2>/dev/null || echo "")
-                if [ -n "$CHANGELOG_CONTENT" ]; then
+                CHANGELOG_RESPONSE=$(gh api "repos/${{ env.UPSTREAM_REPO }}/contents/$changelog_file" 2>&1 || true)
+                if echo "$CHANGELOG_RESPONSE" | jq -e '.content' >/dev/null 2>&1; then
                   echo "Found $changelog_file, parsing version..."
-                  CHANGELOG_VERSION=$(echo "$CHANGELOG_CONTENT" | grep -m1 -oP '(?<=##\s\[?v?)\d+\.\d+(?:\.\d+)?' | head -1 || echo "")
-                  if [ -n "$CHANGELOG_VERSION" ]; then
-                    # 如果只有 X.Y，补全为 X.Y.0
-                    if [[ ! "$CHANGELOG_VERSION" =~ ^\d+\.\d+\.\d+$ ]]; then
-                      CHANGELOG_VERSION="${CHANGELOG_VERSION}.0"
+                  CHANGELOG_CONTENT=$(echo "$CHANGELOG_RESPONSE" | jq -r '.content' | base64 -d 2>/dev/null || true)
+                  if [ -n "$CHANGELOG_CONTENT" ]; then
+                    CHANGELOG_VERSION=$(echo "$CHANGELOG_CONTENT" | grep -m1 -oP '(?<=##\s\[?v?)\d+\.\d+(?:\.\d+)?' | head -1 || true)
+                    if [ -n "$CHANGELOG_VERSION" ]; then
+                      if [[ ! "$CHANGELOG_VERSION" =~ ^\d+\.\d+\.\d+$ ]]; then
+                        CHANGELOG_VERSION="${CHANGELOG_VERSION}.0"
+                      fi
+                      LATEST_VERSION="$CHANGELOG_VERSION"
+                      RELEASE_NOTES="Build version $LATEST_VERSION from CHANGELOG"
+                      echo "Parsed version: $LATEST_VERSION"
+                      break
                     fi
-                    LATEST_VERSION="$CHANGELOG_VERSION"
-                    RELEASE_NOTES="Build version $LATEST_VERSION from CHANGELOG"
-                    echo "Parsed version from $changelog_file: $LATEST_VERSION"
-                    break
                   fi
                 fi
               done
@@ -124,8 +126,9 @@ jobs:
             fi
           fi
 
+          echo "Final version: $LATEST_VERSION"
           echo "latest_version=$LATEST_VERSION" >> $GITHUB_OUTPUT
-          echo "$RELEASE_NOTES" > /tmp/release_notes.txt
+          echo "${RELEASE_NOTES:-Build version $LATEST_VERSION}" > /tmp/release_notes.txt
           echo "release_notes_file=/tmp/release_notes.txt" >> $GITHUB_OUTPUT
 
       - name: Check if update needed
