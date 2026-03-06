@@ -38,6 +38,7 @@ jobs:
       - name: Trigger target workflow
         uses: actions/github-script@v7
         with:
+          github-token: ${{ secrets.GH_TOKEN }}
           script: |
             const targetRepo = '${{ inputs.target_repo }}';
             const targetWorkflow = '${{ inputs.target_workflow }}';
