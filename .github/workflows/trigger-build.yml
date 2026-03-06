@@ -236,19 +236,12 @@ jobs:
               ;;
           esac
 
-      - name: Login to ghcr.io
-        if: steps.check-update.outputs.update_needed == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
-        run: |
-          OWNER=$(echo "${{ inputs.target_repo }}" | cut -d'/' -f1 | tr '[:upper:]' '[:lower:]')
-          echo "$GH_TOKEN" | docker login ghcr.io -u "$OWNER" --password-stdin
-
       - name: Copy image to LazyCat registry
         if: steps.check-update.outputs.update_needed == 'true'
         id: copy-image
         env:
           LZC_CLI_TOKEN: ${{ secrets.LZC_CLI_TOKEN }}
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           TARGET_REPO="${{ inputs.target_repo }}"
           BUILD_VERSION="${{ steps.get-version.outputs.build_version }}"
@@ -259,6 +252,10 @@ jobs:
           GHCR_IMAGE="ghcr.io/${OWNER}/${REPO}:${BUILD_VERSION}"
           
           echo "Copying image: $GHCR_IMAGE"
+          
+          # 登录 ghcr.io 并拉取私有镜像
+          echo "$GH_TOKEN" | docker login ghcr.io -u "$OWNER" --password-stdin
+          docker pull "$GHCR_IMAGE"
           
           COPY_OUTPUT=$(lzc-cli appstore copy-image "$GHCR_IMAGE" 2>&1)
           echo "$COPY_OUTPUT"
