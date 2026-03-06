@@ -29,13 +29,79 @@ on:
         type: boolean
 
 jobs:
-  trigger:
+  build-and-copy:
     runs-on: ubuntu-latest
     permissions:
       contents: write
       actions: write
     steps:
+      - name: Checkout trigger repository
+        uses: actions/checkout@v4
+
+      - name: Get upstream version
+        id: get-version
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TARGET_VERSION="${{ inputs.target_version }}"
+          TARGET_REPO="${{ inputs.target_repo }}"
+          
+          # 从目标仓库获取上游仓库信息
+          UPSTREAM_REPO=$(gh api repos/$TARGET_REPO/contents/README.md --jq '.content' 2>/dev/null | base64 -d | grep -oE 'github\.com/[^/]+/[^/) ]+' | head -1 | sed 's|github.com/||' || echo "")
+          
+          # 硬编码上游仓库映射
+          case "$TARGET_REPO" in
+            CodeEagle/cutia) UPSTREAM_REPO="msgbyte/cutia" ;;
+            CodeEagle/Higress) UPSTREAM_REPO="alibaba/higress" ;;
+            CodeEagle/chatgpt-on-wechat) UPSTREAM_REPO="zhayujie/chatgpt-on-wechat" ;;
+            CodeEagle/OpenFang) UPSTREAM_REPO="" ;;
+            CodeEagle/waoowaoo) UPSTREAM_REPO="" ;;
+            CodeEagle/Moltis) UPSTREAM_REPO="" ;;
+          esac
+          
+          if [ -n "$TARGET_VERSION" ]; then
+            BUILD_VERSION="$TARGET_VERSION"
+          elif [ -n "$UPSTREAM_REPO" ]; then
+            BUILD_VERSION=$(gh api "repos/$UPSTREAM_REPO/commits/main" --jq '.sha[0:7]' 2>/dev/null || echo "latest")
+          else
+            BUILD_VERSION=$(date +%Y%m%d%H%M%S)
+          fi
+          
+          echo "upstream_repo=$UPSTREAM_REPO" >> $GITHUB_OUTPUT
+          echo "build_version=$BUILD_VERSION" >> $GITHUB_OUTPUT
+          echo "Upstream: $UPSTREAM_REPO, Version: $BUILD_VERSION"
+
+      - name: Check if update needed
+        id: check-update
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          TARGET_REPO="${{ inputs.target_repo }}"
+          BUILD_VERSION="${{ steps.get-version.outputs.build_version }}"
+          FORCE_BUILD="${{ inputs.force_build }}"
+          TARGET_VERSION="${{ inputs.target_version }}"
+          
+          # 获取当前 manifest 中的版本
+          MANIFEST_CONTENT=$(gh api repos/$TARGET_REPO/contents/lzc-manifest.yml --jq '.content' 2>/dev/null | base64 -d || echo "")
+          CURRENT_IMAGE=$(echo "$MANIFEST_CONTENT" | grep 'image:' | head -1 | awk '{print $2}')
+          CURRENT_VERSION=$(echo "$MANIFEST_CONTENT" | grep '^version:' | head -1 | awk '{print $2}')
+          
+          echo "Current image: $CURRENT_IMAGE"
+          echo "Current version: $CURRENT_VERSION"
+          
+          if [ -n "$TARGET_VERSION" ]; then
+            echo "update_needed=true" >> $GITHUB_OUTPUT
+          elif [ "$FORCE_BUILD" = "true" ]; then
+            echo "update_needed=true" >> $GITHUB_OUTPUT
+          elif [ -n "$BUILD_VERSION" ] && [ "$CURRENT_VERSION" != "$BUILD_VERSION" ]; then
+            echo "update_needed=true" >> $GITHUB_OUTPUT
+          else
+            echo "update_needed=false" >> $GITHUB_OUTPUT
+          fi
+
       - name: Trigger target workflow
+        if: steps.check-update.outputs.update_needed == 'true'
+        id: trigger
         uses: actions/github-script@v7
         with:
           github-token: ${{ secrets.GH_TOKEN }}
@@ -43,17 +109,13 @@ jobs:
             const targetRepo = '${{ inputs.target_repo }}';
             const targetWorkflow = '${{ inputs.target_workflow }}';
             
-            // 构建输入参数
             const inputs = {};
             if ('${{ inputs.force_build }}' === 'true') inputs.force_build = true;
-            if ('${{ inputs.target_version }}') inputs.target_version = '${{ inputs.target_version }}';
-            if ('${{ inputs.publish_to_store }}' === 'true') inputs.publish_to_store = true;
+            if ('${{ steps.get-version.outputs.build_version }}') inputs.target_version = '${{ steps.get-version.outputs.build_version }}';
             
             console.log('Triggering workflow:', targetWorkflow);
             console.log('On repository:', targetRepo);
-            console.log('With inputs:', JSON.stringify(inputs));
             
-            // 获取工作流 ID
             const workflows = await github.rest.actions.listRepoWorkflows({
               owner: targetRepo.split('/')[0],
               repo: targetRepo.split('/')[1]
@@ -64,10 +126,7 @@ jobs:
               throw new Error(`Workflow not found: ${targetWorkflow}`);
             }
             
-            console.log('Found workflow ID:', workflow.id);
-            
-            // 触发工作流
-            const result = await github.rest.actions.createWorkflowDispatch({
+            await github.rest.actions.createWorkflowDispatch({
               owner: targetRepo.split('/')[0],
               repo: targetRepo.split('/')[1],
               workflow_id: workflow.id,
@@ -75,4 +134,216 @@ jobs:
               inputs: inputs
             });
             
-            console.log('Workflow triggered successfully');
+            core.setOutput('workflow_id', workflow.id);
+            console.log('Workflow triggered');
+
+      - name: Wait for workflow completion
+        if: steps.check-update.outputs.update_needed == 'true'
+        uses: actions/github-script@v7
+        with:
+          github-token: ${{ secrets.GH_TOKEN }}
+          script: |
+            const targetRepo = '${{ inputs.target_repo }}';
+            const workflowId = '${{ steps.trigger.outputs.workflow_id }}';
+            
+            console.log('Waiting for workflow...');
+            
+            let run;
+            for (let i = 0; i < 30; i++) {
+              const runs = await github.rest.actions.listWorkflowRuns({
+                owner: targetRepo.split('/')[0],
+                repo: targetRepo.split('/')[1],
+                workflow_id: parseInt(workflowId),
+                per_page: 1
+              });
+              
+              if (runs.data.workflow_runs.length > 0) {
+                run = runs.data.workflow_runs[0];
+                break;
+              }
+              
+              await new Promise(r => setTimeout(r, 2000));
+            }
+            
+            if (!run) throw new Error('Workflow run not found');
+            
+            console.log('Run ID:', run.id);
+            
+            let status = run.status;
+            while (status !== 'completed') {
+              await new Promise(r => setTimeout(r, 10000));
+              const runData = await github.rest.actions.getWorkflowRun({
+                owner: targetRepo.split('/')[0],
+                repo: targetRepo.split('/')[1],
+                run_id: run.id
+              });
+              status = runData.data.status;
+              console.log('Status:', status);
+            }
+            
+            const conclusion = (await github.rest.actions.getWorkflowRun({
+              owner: targetRepo.split('/')[0],
+              repo: targetRepo.split('/')[1],
+              run_id: run.id
+            })).data.conclusion;
+            
+            if (conclusion !== 'success') {
+              throw new Error(`Workflow failed: ${conclusion}`);
+            }
+            
+            console.log('Workflow completed successfully');
+
+      - name: Setup Node.js
+        if: steps.check-update.outputs.update_needed == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install lzc-cli
+        if: steps.check-update.outputs.update_needed == 'true'
+        run: npm install -g @lazycatcloud/lzc-cli
+
+      - name: Copy dependency images
+        if: steps.check-update.outputs.update_needed == 'true'
+        id: deps-images
+        env:
+          LZC_CLI_TOKEN: ${{ secrets.LZC_CLI_TOKEN }}
+        run: |
+          TARGET_REPO="${{ inputs.target_repo }}"
+          
+          # 根据目标仓库确定需要的依赖镜像
+          case "$TARGET_REPO" in
+            CodeEagle/cutia)
+              echo "Processing PostgreSQL..."
+              POSTGRES_EXISTING=$(lzc-cli appstore my-images 2>&1 | grep "postgres:16-alpine" | grep -oE 'registry\.lazycat\.cloud/[a-zA-Z0-9_/.:-]+postgres[a-zA-Z0-9_/.:-]+' | head -1 || echo "")
+              if [ -n "$POSTGRES_EXISTING" ]; then
+                POSTGRES_URL="$POSTGRES_EXISTING"
+              else
+                COPY_OUTPUT=$(lzc-cli appstore copy-image postgres:16-alpine 2>&1)
+                POSTGRES_URL=$(echo "$COPY_OUTPUT" | grep -oE 'registry\.lazycat\.cloud/[a-zA-Z0-9_/.:-]+' | head -1 || echo "")
+              fi
+              echo "postgres_url=$POSTGRES_URL" >> $GITHUB_OUTPUT
+              
+              echo "Processing Redis..."
+              REDIS_EXISTING=$(lzc-cli appstore my-images 2>&1 | grep "redis:7-alpine" | grep -oE 'registry\.lazycat\.cloud/[a-zA-Z0-9_/.:-]+redis[a-zA-Z0-9_/.:-]+' | head -1 || echo "")
+              if [ -n "$REDIS_EXISTING" ]; then
+                REDIS_URL="$REDIS_EXISTING"
+              else
+                COPY_OUTPUT=$(lzc-cli appstore copy-image redis:7-alpine 2>&1)
+                REDIS_URL=$(echo "$COPY_OUTPUT" | grep -oE 'registry\.lazycat\.cloud/[a-zA-Z0-9_/.:-]+' | head -1 || echo "")
+              fi
+              echo "redis_url=$REDIS_URL" >> $GITHUB_OUTPUT
+              ;;
+          esac
+
+      - name: Copy image to LazyCat registry
+        if: steps.check-update.outputs.update_needed == 'true'
+        id: copy-image
+        env:
+          LZC_CLI_TOKEN: ${{ secrets.LZC_CLI_TOKEN }}
+        run: |
+          TARGET_REPO="${{ inputs.target_repo }}"
+          BUILD_VERSION="${{ steps.get-version.outputs.build_version }}"
+          
+          # 构造 ghcr.io 镜像地址
+          OWNER=$(echo "$TARGET_REPO" | cut -d'/' -f1 | tr '[:upper:]' '[:lower:]')
+          REPO=$(echo "$TARGET_REPO" | cut -d'/' -f2 | tr '[:upper:]' '[:lower:]')
+          GHCR_IMAGE="ghcr.io/${OWNER}/${REPO}:${BUILD_VERSION}"
+          
+          echo "Copying image: $GHCR_IMAGE"
+          
+          COPY_OUTPUT=$(lzc-cli appstore copy-image "$GHCR_IMAGE" 2>&1)
+          echo "$COPY_OUTPUT"
+          
+          ACCELERATED_URL=$(echo "$COPY_OUTPUT" | grep -oE 'registry\.lazycat\.cloud/[a-zA-Z0-9_/.:-]+' | head -1 || echo "")
+          
+          if [ -z "$ACCELERATED_URL" ]; then
+            echo "Failed to get accelerated URL"
+            exit 1
+          fi
+          
+          echo "accelerated_url=$ACCELERATED_URL" >> $GITHUB_OUTPUT
+          echo "Image copied to: $ACCELERATED_URL"
+
+      - name: Checkout target repository
+        if: steps.check-update.outputs.update_needed == 'true'
+        uses: actions/checkout@v4
+        with:
+          repository: ${{ inputs.target_repo }}
+          token: ${{ secrets.GH_TOKEN }}
+
+      - name: Update manifest
+        if: steps.check-update.outputs.update_needed == 'true'
+        run: |
+          ACCELERATED_URL="${{ steps.copy-image.outputs.accelerated_url }}"
+          BUILD_VERSION="${{ steps.get-version.outputs.build_version }}"
+          POSTGRES_URL="${{ steps.deps-images.outputs.postgres_url }}"
+          REDIS_URL="${{ steps.deps-images.outputs.redis_url }}"
+          
+          # 更新主镜像和版本
+          sed -i "s|image: .*|image: $ACCELERATED_URL|g" lzc-manifest.yml
+          sed -i "s|^version:.*|version: $BUILD_VERSION|g" lzc-manifest.yml
+          
+          # 更新 PostgreSQL 镜像地址
+          if [ -n "$POSTGRES_URL" ]; then
+            sed -i "s|image: registry.lazycat.cloud/library/postgres:16-alpine|image: $POSTGRES_URL|g" lzc-manifest.yml
+          fi
+          
+          # 更新 Redis 镜像地址
+          if [ -n "$REDIS_URL" ]; then
+            sed -i "s|image: registry.lazycat.cloud/library/redis:7-alpine|image: $REDIS_URL|g" lzc-manifest.yml
+          fi
+          
+          echo "Updated to version: $BUILD_VERSION"
+          echo "Updated image: $ACCELERATED_URL"
+
+      - name: Build package
+        if: steps.check-update.outputs.update_needed == 'true'
+        env:
+          LZC_CLI_TOKEN: ${{ secrets.LZC_CLI_TOKEN }}
+        run: |
+          PROJECT_NAME_LOWER=$(basename ${{ inputs.target_repo }})
+          lzc-cli project build -o ${PROJECT_NAME_LOWER}.lpk
+
+      - name: Publish to LazyCat App Store
+        if: steps.check-update.outputs.update_needed == 'true' && inputs.publish_to_store == true
+        env:
+          LZC_CLI_TOKEN: ${{ secrets.LZC_CLI_TOKEN }}
+        run: |
+          BUILD_VERSION="${{ steps.get-version.outputs.build_version }}"
+          PROJECT_NAME_LOWER=$(basename ${{ inputs.target_repo }})
+          lzc-cli appstore publish ${PROJECT_NAME_LOWER}.lpk --clang en -c "Auto-built version $BUILD_VERSION"
+
+      - name: Create GitHub Release
+        if: steps.check-update.outputs.update_needed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          BUILD_VERSION="${{ steps.get-version.outputs.build_version }}"
+          PROJECT_NAME_LOWER=$(basename ${{ inputs.target_repo }})
+          
+          gh release delete "v$BUILD_VERSION" --repo ${{ inputs.target_repo }} --yes 2>/dev/null || true
+          gh release create "v$BUILD_VERSION" \
+            --repo ${{ inputs.target_repo }} \
+            --title "v$BUILD_VERSION" \
+            --notes "Auto-built version $BUILD_VERSION" \
+            ${PROJECT_NAME_LOWER}.lpk
+
+      - name: Commit and push changes
+        if: steps.check-update.outputs.update_needed == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+        run: |
+          BUILD_VERSION="${{ steps.get-version.outputs.build_version }}"
+          FILE_SHA=$(gh api repos/${{ inputs.target_repo }}/contents/lzc-manifest.yml --jq '.sha' 2>/dev/null || echo "")
+          
+          if [ -z "$FILE_SHA" ]; then
+            echo "Failed to get file SHA"
+            exit 1
+          fi
+          
+          gh api -X PUT repos/${{ inputs.target_repo }}/contents/lzc-manifest.yml \
+            -f message="Update to version $BUILD_VERSION" \
+            -f content="$(base64 -w 0 lzc-manifest.yml)" \
+            -f sha="$FILE_SHA" \
+            -f branch="main"
