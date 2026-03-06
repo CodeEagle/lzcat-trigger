@@ -1,32 +1,27 @@
-# {{PROJECT_NAME}} - 懒猫微服自动构建项目
+# LazyCat Trigger
 
-> [!NOTE]
-> 本项目是 [{{PROJECT_NAME}}]({{UPSTREAM_URL}}) 的懒猫微服（LazyCat）自动构建项目，用于自动跟踪上游镜像更新并发布到懒猫应用商店。
+统一触发器项目，用于触发懒猫移植项目的自动构建。
 
-> [!IMPORTANT]
-> **Icon 规范**：`icon.png` 文件大小不得超过 **200KB**，建议使用 512x512 像素的 PNG 格式图片。
+## 使用方法
 
-**{{PROJECT_NAME}} - {{PROJECT_DESCRIPTION}}**
+手动触发工作流，填写以下参数：
 
-## 关于本项目
+| 参数 | 说明 | 示例 |
+|------|------|------|
+| target_repo | 目标仓库 | CodeEagle/cutia |
+| target_workflow | 工作流文件名 | update-image.yml |
+| force_build | 强制构建 | false |
+| target_version | 指定版本 | |
+| publish_to_store | 发布到商店 | false |
 
-本项目会自动监测 [{{UPSTREAM_REPO}}]({{UPSTREAM_URL}}) 的容器镜像更新，当有新版本发布时：
-1. 自动复制镜像到懒猫官方镜像源
-2. 更新 `lzc-manifest.yml` 配置
-3. 构建并发布到懒猫应用商店
+## 工作原理
 
-## {{PROJECT_NAME}} 简介
+1. 触发 lzcat-trigger 仓库的工作流
+2. 使用 GitHub API 调用目标仓库的 workflow_dispatch
+3. 目标仓库的 update-image.yml 会执行完整的构建流程
 
-<!-- TODO: 添加项目简介 -->
+## 优势
 
-## 功能特性
-
-<!-- TODO: 添加功能特性列表 -->
-
-## Homepage
-
-访问 [{{PROJECT_HOMEPAGE}}]({{PROJECT_HOMEPAGE}}) 了解更多信息。
-
-## License
-
-<!-- TODO: 添加许可证信息 -->
+- 只需要在 lzcat-trigger 项目中配置一次 secrets
+- 所有移植项目共享基础设施
+- 集中管理构建触发

@@ -1,0 +1,77 @@
+name: Trigger Build
+
+on:
+  workflow_dispatch:
+    inputs:
+      target_repo:
+        description: 'Target repository (e.g., CodeEagle/cutia)'
+        required: true
+        type: string
+      target_workflow:
+        description: 'Target workflow filename'
+        required: false
+        default: 'update-image.yml'
+        type: string
+      force_build:
+        description: 'Force build'
+        required: false
+        default: false
+        type: boolean
+      target_version:
+        description: 'Target version'
+        required: false
+        default: ''
+        type: string
+      publish_to_store:
+        description: 'Publish to LazyCat App Store'
+        required: false
+        default: false
+        type: boolean
+
+jobs:
+  trigger:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+      actions: write
+    steps:
+      - name: Trigger target workflow
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const targetRepo = '${{ inputs.target_repo }}';
+            const targetWorkflow = '${{ inputs.target_workflow }}';
+            
+            // 构建输入参数
+            const inputs = {};
+            if ('${{ inputs.force_build }}' === 'true') inputs.force_build = true;
+            if ('${{ inputs.target_version }}') inputs.target_version = '${{ inputs.target_version }}';
+            if ('${{ inputs.publish_to_store }}' === 'true') inputs.publish_to_store = true;
+            
+            console.log('Triggering workflow:', targetWorkflow);
+            console.log('On repository:', targetRepo);
+            console.log('With inputs:', JSON.stringify(inputs));
+            
+            // 获取工作流 ID
+            const workflows = await github.rest.actions.listRepoWorkflows({
+              owner: targetRepo.split('/')[0],
+              repo: targetRepo.split('/')[1]
+            });
+            
+            const workflow = workflows.data.workflows.find(w => w.path.endsWith(targetWorkflow));
+            if (!workflow) {
+              throw new Error(`Workflow not found: ${targetWorkflow}`);
+            }
+            
+            console.log('Found workflow ID:', workflow.id);
+            
+            // 触发工作流
+            const result = await github.rest.actions.createWorkflowDispatch({
+              owner: targetRepo.split('/')[0],
+              repo: targetRepo.split('/')[1],
+              workflow_id: workflow.id,
+              ref: 'main',
+              inputs: inputs
+            });
+            
+            console.log('Workflow triggered successfully');
