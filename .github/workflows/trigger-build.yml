@@ -328,6 +328,8 @@ jobs:
         run: |
           TARGET_REPO="${{ inputs.target_repo }}"
           SOURCE_VERSION="${{ steps.get-version.outputs.source_version }}"
+          FORCE_BUILD="${{ inputs.force_build }}"
+          TARGET_VERSION="${{ inputs.target_version }}"
           
           # 构造 ghcr.io 镜像地址
           OWNER=$(echo "$TARGET_REPO" | cut -d'/' -f1 | tr '[:upper:]' '[:lower:]')
@@ -337,10 +339,18 @@ jobs:
           echo "Copying image: $GHCR_IMAGE"
 
           EXISTING_ACCELERATED_URL=$(lzc-cli appstore my-images 2>&1 | grep "/${REPO}:${SOURCE_VERSION}" | grep -oE 'registry\.lazycat\.cloud/[a-zA-Z0-9_/.:-]+' | head -1 || echo "")
-          if [ -n "$EXISTING_ACCELERATED_URL" ]; then
+          CAN_REUSE_EXISTING="true"
+          if [ "$FORCE_BUILD" = "true" ] || [ -n "$TARGET_VERSION" ]; then
+            CAN_REUSE_EXISTING="false"
+          fi
+
+          if [ "$CAN_REUSE_EXISTING" = "true" ] && [ -n "$EXISTING_ACCELERATED_URL" ]; then
             ACCELERATED_URL="$EXISTING_ACCELERATED_URL"
             echo "Reusing existing image: $ACCELERATED_URL"
           else
+            if [ -n "$EXISTING_ACCELERATED_URL" ]; then
+              echo "Skipping image reuse because force rebuild or explicit target version was requested"
+            fi
             # 登录 ghcr.io 并拉取私有镜像
             echo "$GH_TOKEN" | docker login ghcr.io -u "$OWNER" --password-stdin
             docker pull "$GHCR_IMAGE"
