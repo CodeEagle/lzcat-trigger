@@ -335,15 +335,35 @@ jobs:
           GHCR_IMAGE="ghcr.io/${OWNER}/${REPO}:${SOURCE_VERSION}"
           
           echo "Copying image: $GHCR_IMAGE"
-          
-          # 登录 ghcr.io 并拉取私有镜像
-          echo "$GH_TOKEN" | docker login ghcr.io -u "$OWNER" --password-stdin
-          docker pull "$GHCR_IMAGE"
-          
-          COPY_OUTPUT=$(lzc-cli appstore copy-image "$GHCR_IMAGE" 2>&1)
-          echo "$COPY_OUTPUT"
-          
-          ACCELERATED_URL=$(echo "$COPY_OUTPUT" | grep -oE 'registry\.lazycat\.cloud/[a-zA-Z0-9_/.:-]+' | head -1 || echo "")
+
+          EXISTING_ACCELERATED_URL=$(lzc-cli appstore my-images 2>&1 | grep "/${REPO}:${SOURCE_VERSION}" | grep -oE 'registry\.lazycat\.cloud/[a-zA-Z0-9_/.:-]+' | head -1 || echo "")
+          if [ -n "$EXISTING_ACCELERATED_URL" ]; then
+            ACCELERATED_URL="$EXISTING_ACCELERATED_URL"
+            echo "Reusing existing image: $ACCELERATED_URL"
+          else
+            # 登录 ghcr.io 并拉取私有镜像
+            echo "$GH_TOKEN" | docker login ghcr.io -u "$OWNER" --password-stdin
+            docker pull "$GHCR_IMAGE"
+
+            set +e
+            COPY_OUTPUT=$(timeout 900 lzc-cli appstore copy-image "$GHCR_IMAGE" 2>&1)
+            COPY_STATUS=$?
+            set -e
+
+            echo "$COPY_OUTPUT"
+
+            if [ "$COPY_STATUS" -eq 124 ]; then
+              echo "Timed out while copying image: $GHCR_IMAGE"
+              exit 1
+            fi
+
+            if [ "$COPY_STATUS" -ne 0 ]; then
+              echo "Failed to copy image: $GHCR_IMAGE"
+              exit "$COPY_STATUS"
+            fi
+
+            ACCELERATED_URL=$(echo "$COPY_OUTPUT" | grep -oE 'registry\.lazycat\.cloud/[a-zA-Z0-9_/.:-]+' | head -1 || echo "")
+          fi
           
           if [ -z "$ACCELERATED_URL" ]; then
             echo "Failed to get accelerated URL"
