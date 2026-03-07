@@ -45,6 +45,17 @@ jobs:
         run: |
           TARGET_VERSION="${{ inputs.target_version }}"
           TARGET_REPO="${{ inputs.target_repo }}"
+
+          is_semver() {
+            [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          }
+
+          bump_patch() {
+            local version="$1"
+            local major minor patch
+            IFS='.' read -r major minor patch <<< "$version"
+            echo "${major}.${minor}.$((patch + 1))"
+          }
           
           # 从目标仓库获取上游仓库信息
           UPSTREAM_REPO=$(gh api repos/$TARGET_REPO/contents/README.md --jq '.content' 2>/dev/null | base64 -d | grep -oE 'github\.com/[^/]+/[^/) ]+' | head -1 | sed 's|github.com/||' || echo "")
@@ -58,18 +69,87 @@ jobs:
             CodeEagle/waoowaoo) UPSTREAM_REPO="" ;;
             CodeEagle/Moltis) UPSTREAM_REPO="" ;;
           esac
+
+          MANIFEST_CONTENT=$(gh api repos/$TARGET_REPO/contents/lzc-manifest.yml --jq '.content' 2>/dev/null | base64 -d || echo "")
+          CURRENT_VERSION=$(echo "$MANIFEST_CONTENT" | grep '^version:' | head -1 | awk '{print $2}')
+          META_CONTENT=$(gh api repos/$TARGET_REPO/contents/.lazycat-build.json --jq '.content' 2>/dev/null | base64 -d || echo "{}")
+          CURRENT_BUILD_VERSION=$(echo "$META_CONTENT" | jq -r '.build_version // empty' 2>/dev/null || echo "")
+          CURRENT_SOURCE_VERSION=$(echo "$META_CONTENT" | jq -r '.source_version // empty' 2>/dev/null || echo "")
+
+          if [ -z "$CURRENT_BUILD_VERSION" ]; then
+            CURRENT_BUILD_VERSION="$CURRENT_VERSION"
+          fi
           
           if [ -n "$TARGET_VERSION" ]; then
+            SOURCE_VERSION="$TARGET_VERSION"
             BUILD_VERSION="$TARGET_VERSION"
           elif [ -n "$UPSTREAM_REPO" ]; then
-            BUILD_VERSION=$(gh api "repos/$UPSTREAM_REPO/commits/main" --jq '.sha[0:7]' 2>/dev/null || echo "latest")
+            BUILD_VERSION=""
+            SOURCE_VERSION=""
+
+            RELEASE_TAG=$(gh api "repos/$UPSTREAM_REPO/releases/latest" --jq '.tag_name' 2>/dev/null || echo "")
+            RELEASE_VERSION="${RELEASE_TAG#v}"
+            if [ -n "$RELEASE_TAG" ] && is_semver "$RELEASE_VERSION"; then
+              SOURCE_VERSION="$RELEASE_VERSION"
+              BUILD_VERSION="$RELEASE_VERSION"
+            fi
+
+            if [ -z "$BUILD_VERSION" ]; then
+              TAG_NAME=$(gh api "repos/$UPSTREAM_REPO/tags?per_page=20" --jq '.[].name' 2>/dev/null | while read -r tag; do
+                norm="${tag#v}"
+                if [[ "$norm" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                  echo "$norm"
+                  break
+                fi
+              done)
+              if [ -n "$TAG_NAME" ]; then
+                SOURCE_VERSION="$TAG_NAME"
+                BUILD_VERSION="$TAG_NAME"
+              fi
+            fi
+
+            if [ -z "$BUILD_VERSION" ]; then
+              for changelog_file in CHANGELOG.md CHANGELOG changelog.md HISTORY.md RELEASE.md; do
+                CHANGELOG_CONTENT=$(gh api "repos/$UPSTREAM_REPO/contents/$changelog_file" --jq '.content' 2>/dev/null | base64 -d 2>/dev/null || true)
+                if [ -n "$CHANGELOG_CONTENT" ]; then
+                  CHANGELOG_VERSION=$(echo "$CHANGELOG_CONTENT" | grep -m1 -E '^##\s+\[?v?[0-9]+\.[0-9]+' | sed -E 's/^##\s+\[?v?([0-9]+\.[0-9]+(\.[0-9]+)?).*/\1/' | head -1 || true)
+                  if [ -n "$CHANGELOG_VERSION" ]; then
+                    if [[ ! "$CHANGELOG_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+                      CHANGELOG_VERSION="${CHANGELOG_VERSION}.0"
+                    fi
+                    SOURCE_VERSION="$CHANGELOG_VERSION"
+                    BUILD_VERSION="$CHANGELOG_VERSION"
+                    break
+                  fi
+                fi
+              done
+            fi
+
+            if [ -z "$BUILD_VERSION" ]; then
+              SOURCE_VERSION=$(gh api "repos/$UPSTREAM_REPO/commits/main" --jq '.sha[0:7]' 2>/dev/null || echo "latest")
+              if [ "$TARGET_REPO" = "CodeEagle/cutia" ]; then
+                if is_semver "$CURRENT_BUILD_VERSION"; then
+                  if [ "$SOURCE_VERSION" = "$CURRENT_SOURCE_VERSION" ]; then
+                    BUILD_VERSION="$CURRENT_BUILD_VERSION"
+                  else
+                    BUILD_VERSION=$(bump_patch "$CURRENT_BUILD_VERSION")
+                  fi
+                else
+                  BUILD_VERSION="0.1.0"
+                fi
+              else
+                BUILD_VERSION="$SOURCE_VERSION"
+              fi
+            fi
           else
-            BUILD_VERSION=$(date +%Y%m%d%H%M%S)
+            SOURCE_VERSION=$(date +%Y%m%d%H%M%S)
+            BUILD_VERSION="$SOURCE_VERSION"
           fi
           
           echo "upstream_repo=$UPSTREAM_REPO" >> $GITHUB_OUTPUT
+          echo "source_version=$SOURCE_VERSION" >> $GITHUB_OUTPUT
           echo "build_version=$BUILD_VERSION" >> $GITHUB_OUTPUT
-          echo "Upstream: $UPSTREAM_REPO, Version: $BUILD_VERSION"
+          echo "Upstream: $UPSTREAM_REPO, Source: $SOURCE_VERSION, Version: $BUILD_VERSION"
 
       - name: Check if update needed
         id: check-update
@@ -78,6 +158,7 @@ jobs:
         run: |
           TARGET_REPO="${{ inputs.target_repo }}"
           BUILD_VERSION="${{ steps.get-version.outputs.build_version }}"
+          SOURCE_VERSION="${{ steps.get-version.outputs.source_version }}"
           FORCE_BUILD="${{ inputs.force_build }}"
           TARGET_VERSION="${{ inputs.target_version }}"
           
@@ -93,7 +174,9 @@ jobs:
             echo "update_needed=true" >> $GITHUB_OUTPUT
           elif [ "$FORCE_BUILD" = "true" ]; then
             echo "update_needed=true" >> $GITHUB_OUTPUT
-          elif [ -n "$BUILD_VERSION" ] && [ "$CURRENT_VERSION" != "$BUILD_VERSION" ]; then
+          elif [ -n "$CURRENT_SOURCE_VERSION" ] && [ -n "$SOURCE_VERSION" ] && [ "$CURRENT_SOURCE_VERSION" != "$SOURCE_VERSION" ]; then
+            echo "update_needed=true" >> $GITHUB_OUTPUT
+          elif [ -z "$CURRENT_SOURCE_VERSION" ] && [ -n "$BUILD_VERSION" ] && [ "$CURRENT_VERSION" != "$BUILD_VERSION" ]; then
             echo "update_needed=true" >> $GITHUB_OUTPUT
           else
             echo "update_needed=false" >> $GITHUB_OUTPUT
@@ -111,7 +194,7 @@ jobs:
             
             const inputs = {};
             if ('${{ inputs.force_build }}' === 'true') inputs.force_build = true;
-            if ('${{ steps.get-version.outputs.build_version }}') inputs.target_version = '${{ steps.get-version.outputs.build_version }}';
+            if ('${{ steps.get-version.outputs.source_version }}') inputs.target_version = '${{ steps.get-version.outputs.source_version }}';
             
             console.log('Triggering workflow:', targetWorkflow);
             console.log('On repository:', targetRepo);
@@ -244,12 +327,12 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           TARGET_REPO="${{ inputs.target_repo }}"
-          BUILD_VERSION="${{ steps.get-version.outputs.build_version }}"
+          SOURCE_VERSION="${{ steps.get-version.outputs.source_version }}"
           
           # 构造 ghcr.io 镜像地址
           OWNER=$(echo "$TARGET_REPO" | cut -d'/' -f1 | tr '[:upper:]' '[:lower:]')
           REPO=$(echo "$TARGET_REPO" | cut -d'/' -f2 | tr '[:upper:]' '[:lower:]')
-          GHCR_IMAGE="ghcr.io/${OWNER}/${REPO}:${BUILD_VERSION}"
+          GHCR_IMAGE="ghcr.io/${OWNER}/${REPO}:${SOURCE_VERSION}"
           
           echo "Copying image: $GHCR_IMAGE"
           
@@ -282,6 +365,7 @@ jobs:
         run: |
           ACCELERATED_URL="${{ steps.copy-image.outputs.accelerated_url }}"
           BUILD_VERSION="${{ steps.get-version.outputs.build_version }}"
+          SOURCE_VERSION="${{ steps.get-version.outputs.source_version }}"
           POSTGRES_URL="${{ steps.deps-images.outputs.postgres_url }}"
           REDIS_URL="${{ steps.deps-images.outputs.redis_url }}"
           
@@ -301,6 +385,13 @@ jobs:
           
           echo "Updated to version: $BUILD_VERSION"
           echo "Updated image: $ACCELERATED_URL"
+
+          cat > .lazycat-build.json <<EOF
+          {
+            "source_version": "$SOURCE_VERSION",
+            "build_version": "$BUILD_VERSION"
+          }
+          EOF
 
       - name: Build package
         if: steps.check-update.outputs.update_needed == 'true'
@@ -325,30 +416,26 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           BUILD_VERSION="${{ steps.get-version.outputs.build_version }}"
+          SOURCE_VERSION="${{ steps.get-version.outputs.source_version }}"
           PROJECT_NAME_LOWER=$(basename ${{ inputs.target_repo }})
           
           gh release delete "v$BUILD_VERSION" --repo ${{ inputs.target_repo }} --yes 2>/dev/null || true
           gh release create "v$BUILD_VERSION" \
             --repo ${{ inputs.target_repo }} \
             --title "v$BUILD_VERSION" \
-            --notes "Auto-built version $BUILD_VERSION" \
+            --notes "Auto-built version $BUILD_VERSION (source: $SOURCE_VERSION)" \
             ${PROJECT_NAME_LOWER}.lpk
 
       - name: Commit and push changes
         if: steps.check-update.outputs.update_needed == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
         run: |
           BUILD_VERSION="${{ steps.get-version.outputs.build_version }}"
-          FILE_SHA=$(gh api repos/${{ inputs.target_repo }}/contents/lzc-manifest.yml --jq '.sha' 2>/dev/null || echo "")
-          
-          if [ -z "$FILE_SHA" ]; then
-            echo "Failed to get file SHA"
-            exit 1
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add lzc-manifest.yml .lazycat-build.json
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+            exit 0
           fi
-          
-          gh api -X PUT repos/${{ inputs.target_repo }}/contents/lzc-manifest.yml \
-            -f message="Update to version $BUILD_VERSION" \
-            -f content="$(base64 -w 0 lzc-manifest.yml)" \
-            -f sha="$FILE_SHA" \
-            -f branch="main"
+          git commit -m "Update to version $BUILD_VERSION"
+          git push
