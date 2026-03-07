@@ -286,7 +286,7 @@ jobs:
           REDIS_URL="${{ steps.deps-images.outputs.redis_url }}"
           
           # 更新主镜像和版本
-          sed -i "s|image: .*|image: $ACCELERATED_URL|g" lzc-manifest.yml
+          sed -i "0,/image: .*/s|image: .*|image: $ACCELERATED_URL|" lzc-manifest.yml
           sed -i "s|^version:.*|version: $BUILD_VERSION|g" lzc-manifest.yml
           
           # 更新 PostgreSQL 镜像地址
