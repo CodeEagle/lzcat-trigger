@@ -356,14 +356,14 @@ jobs:
             docker pull "$GHCR_IMAGE"
 
             set +e
-            COPY_OUTPUT=$(timeout 900 lzc-cli appstore copy-image "$GHCR_IMAGE" 2>&1)
+            COPY_OUTPUT=$(timeout 1800 lzc-cli appstore copy-image "$GHCR_IMAGE" 2>&1)
             COPY_STATUS=$?
             set -e
 
             echo "$COPY_OUTPUT"
 
             if [ "$COPY_STATUS" -eq 124 ]; then
-              echo "Timed out while copying image: $GHCR_IMAGE"
+              echo "Timed out while copying image after 1800 seconds: $GHCR_IMAGE"
               exit 1
             fi
 
