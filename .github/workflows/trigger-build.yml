@@ -65,6 +65,7 @@ jobs:
             CodeEagle/cutia) UPSTREAM_REPO="msgbyte/cutia" ;;
             CodeEagle/Higress) UPSTREAM_REPO="alibaba/higress" ;;
             CodeEagle/chatgpt-on-wechat) UPSTREAM_REPO="zhayujie/chatgpt-on-wechat" ;;
+            CodeEagle/GitNexus) UPSTREAM_REPO="abhigyanpatwari/GitNexus" ;;
             CodeEagle/OpenFang) UPSTREAM_REPO="" ;;
             CodeEagle/waoowaoo) UPSTREAM_REPO="" ;;
             CodeEagle/Moltis) UPSTREAM_REPO="" ;;
