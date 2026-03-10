@@ -66,6 +66,7 @@ jobs:
             CodeEagle/Higress) UPSTREAM_REPO="alibaba/higress" ;;
             CodeEagle/chatgpt-on-wechat) UPSTREAM_REPO="zhayujie/chatgpt-on-wechat" ;;
             CodeEagle/GitNexus) UPSTREAM_REPO="abhigyanpatwari/GitNexus" ;;
+            CodeEagle/airflow) UPSTREAM_REPO="apache/airflow" ;;
             CodeEagle/OpenFang) UPSTREAM_REPO="" ;;
             CodeEagle/waoowaoo) UPSTREAM_REPO="" ;;
             CodeEagle/Moltis) UPSTREAM_REPO="" ;;
@@ -298,6 +299,27 @@ jobs:
           # 根据目标仓库确定需要的依赖镜像
           case "$TARGET_REPO" in
             CodeEagle/cutia)
+              echo "Processing PostgreSQL..."
+              POSTGRES_EXISTING=$(lzc-cli appstore my-images 2>&1 | grep "postgres:16-alpine" | grep -oE 'registry\.lazycat\.cloud/[a-zA-Z0-9_/.:-]+postgres[a-zA-Z0-9_/.:-]+' | head -1 || echo "")
+              if [ -n "$POSTGRES_EXISTING" ]; then
+                POSTGRES_URL="$POSTGRES_EXISTING"
+              else
+                COPY_OUTPUT=$(lzc-cli appstore copy-image postgres:16-alpine 2>&1)
+                POSTGRES_URL=$(echo "$COPY_OUTPUT" | grep -oE 'registry\.lazycat\.cloud/[a-zA-Z0-9_/.:-]+' | head -1 || echo "")
+              fi
+              echo "postgres_url=$POSTGRES_URL" >> $GITHUB_OUTPUT
+              
+              echo "Processing Redis..."
+              REDIS_EXISTING=$(lzc-cli appstore my-images 2>&1 | grep "redis:7-alpine" | grep -oE 'registry\.lazycat\.cloud/[a-zA-Z0-9_/.:-]+redis[a-zA-Z0-9_/.:-]+' | head -1 || echo "")
+              if [ -n "$REDIS_EXISTING" ]; then
+                REDIS_URL="$REDIS_EXISTING"
+              else
+                COPY_OUTPUT=$(lzc-cli appstore copy-image redis:7-alpine 2>&1)
+                REDIS_URL=$(echo "$COPY_OUTPUT" | grep -oE 'registry\.lazycat\.cloud/[a-zA-Z0-9_/.:-]+' | head -1 || echo "")
+              fi
+              echo "redis_url=$REDIS_URL" >> $GITHUB_OUTPUT
+              ;;
+            CodeEagle/airflow)
               echo "Processing PostgreSQL..."
               POSTGRES_EXISTING=$(lzc-cli appstore my-images 2>&1 | grep "postgres:16-alpine" | grep -oE 'registry\.lazycat\.cloud/[a-zA-Z0-9_/.:-]+postgres[a-zA-Z0-9_/.:-]+' | head -1 || echo "")
               if [ -n "$POSTGRES_EXISTING" ]; then
