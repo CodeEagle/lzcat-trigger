@@ -65,9 +65,10 @@ jobs:
             CodeEagle/cutia) UPSTREAM_REPO="msgbyte/cutia" ;;
             CodeEagle/Higress) UPSTREAM_REPO="alibaba/higress" ;;
             CodeEagle/chatgpt-on-wechat) UPSTREAM_REPO="zhayujie/chatgpt-on-wechat" ;;
+            CodeEagle/chatgpt-on-wechat-lazycat) UPSTREAM_REPO="zhayujie/chatgpt-on-wechat" ;;
             CodeEagle/GitNexus) UPSTREAM_REPO="abhigyanpatwari/GitNexus" ;;
             CodeEagle/airflow) UPSTREAM_REPO="apache/airflow" ;;
-            CodeEagle/OpenFang) UPSTREAM_REPO="" ;;
+            CodeEagle/OpenFang) UPSTREAM_REPO="RightNow-AI/openfang" ;;
             CodeEagle/waoowaoo) UPSTREAM_REPO="" ;;
             CodeEagle/Moltis) UPSTREAM_REPO="" ;;
           esac
@@ -357,11 +358,28 @@ jobs:
           # 构造 ghcr.io 镜像地址
           OWNER=$(echo "$TARGET_REPO" | cut -d'/' -f1 | tr '[:upper:]' '[:lower:]')
           REPO=$(echo "$TARGET_REPO" | cut -d'/' -f2 | tr '[:upper:]' '[:lower:]')
-          GHCR_IMAGE="ghcr.io/${OWNER}/${REPO}:${SOURCE_VERSION}"
+          TAG_CANDIDATES=("$SOURCE_VERSION")
+          if [ -n "$BUILD_VERSION" ] && [ "$BUILD_VERSION" != "$SOURCE_VERSION" ]; then
+            TAG_CANDIDATES+=("$BUILD_VERSION")
+          fi
+          if [[ "$SOURCE_VERSION" == v* ]]; then
+            TAG_CANDIDATES+=("${SOURCE_VERSION#v}")
+          else
+            TAG_CANDIDATES+=("v${SOURCE_VERSION}")
+          fi
+          if [ -n "$BUILD_VERSION" ]; then
+            if [[ "$BUILD_VERSION" == v* ]]; then
+              TAG_CANDIDATES+=("${BUILD_VERSION#v}")
+            else
+              TAG_CANDIDATES+=("v${BUILD_VERSION}")
+            fi
+          fi
           
-          echo "Copying image: $GHCR_IMAGE"
+          FIRST_TAG="${TAG_CANDIDATES[0]}"
+          GHCR_IMAGE="ghcr.io/${OWNER}/${REPO}:${FIRST_TAG}"
+          echo "Copying image candidates for ${TARGET_REPO}: ${TAG_CANDIDATES[*]}"
 
-          EXISTING_ACCELERATED_URL=$(lzc-cli appstore my-images 2>&1 | grep "/${REPO}:${SOURCE_VERSION}" | grep -oE 'registry\.lazycat\.cloud/[a-zA-Z0-9_/.:-]+' | head -1 || echo "")
+          EXISTING_ACCELERATED_URL=$(lzc-cli appstore my-images 2>&1 | grep "/${REPO}:${FIRST_TAG}" | grep -oE 'registry\.lazycat\.cloud/[a-zA-Z0-9_/.:-]+' | head -1 || echo "")
           CAN_REUSE_EXISTING="true"
           if [ "$FORCE_BUILD" = "true" ] || [ -n "$TARGET_VERSION" ]; then
             CAN_REUSE_EXISTING="false"
@@ -374,28 +392,41 @@ jobs:
             if [ -n "$EXISTING_ACCELERATED_URL" ]; then
               echo "Skipping image reuse because force rebuild or explicit target version was requested"
             fi
-            # 登录 ghcr.io 并拉取私有镜像
             echo "$GH_TOKEN" | docker login ghcr.io -u "$OWNER" --password-stdin
-            docker pull "$GHCR_IMAGE"
+            ACCELERATED_URL=""
+            COPY_STATUS=1
+            for TAG in "${TAG_CANDIDATES[@]}"; do
+              GHCR_IMAGE="ghcr.io/${OWNER}/${REPO}:${TAG}"
+              echo "Trying image: $GHCR_IMAGE"
+              if ! docker pull "$GHCR_IMAGE"; then
+                echo "Pull failed for $GHCR_IMAGE"
+                continue
+              fi
 
-            set +e
-            COPY_OUTPUT=$(timeout 1800 lzc-cli appstore copy-image "$GHCR_IMAGE" 2>&1)
-            COPY_STATUS=$?
-            set -e
+              set +e
+              COPY_OUTPUT=$(timeout 1800 lzc-cli appstore copy-image "$GHCR_IMAGE" 2>&1)
+              COPY_STATUS=$?
+              set -e
 
-            echo "$COPY_OUTPUT"
+              echo "$COPY_OUTPUT"
 
-            if [ "$COPY_STATUS" -eq 124 ]; then
-              echo "Timed out while copying image after 1800 seconds: $GHCR_IMAGE"
-              exit 1
-            fi
+              if [ "$COPY_STATUS" -eq 124 ]; then
+                echo "Timed out while copying image after 1800 seconds: $GHCR_IMAGE"
+                exit 1
+              fi
 
-            if [ "$COPY_STATUS" -ne 0 ]; then
-              echo "Failed to copy image: $GHCR_IMAGE"
+              if [ "$COPY_STATUS" -eq 0 ]; then
+                ACCELERATED_URL=$(echo "$COPY_OUTPUT" | grep -oE 'registry\.lazycat\.cloud/[a-zA-Z0-9_/.:-]+' | head -1 || echo "")
+                if [ -n "$ACCELERATED_URL" ]; then
+                  break
+                fi
+              fi
+            done
+            
+            if [ -z "$ACCELERATED_URL" ] && [ "$COPY_STATUS" -ne 0 ]; then
+              echo "Failed to copy any candidate image for $TARGET_REPO"
               exit "$COPY_STATUS"
             fi
-
-            ACCELERATED_URL=$(echo "$COPY_OUTPUT" | grep -oE 'registry\.lazycat\.cloud/[a-zA-Z0-9_/.:-]+' | head -1 || echo "")
           fi
           
           if [ -z "$ACCELERATED_URL" ]; then
