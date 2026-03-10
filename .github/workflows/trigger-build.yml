@@ -90,11 +90,14 @@ jobs:
             BUILD_VERSION=""
             SOURCE_VERSION=""
 
-            RELEASE_TAG=$(gh api "repos/$UPSTREAM_REPO/releases/latest" --jq '.tag_name' 2>/dev/null || echo "")
-            RELEASE_VERSION="${RELEASE_TAG#v}"
-            if [ -n "$RELEASE_TAG" ] && is_semver "$RELEASE_VERSION"; then
-              SOURCE_VERSION="$RELEASE_TAG"
-              BUILD_VERSION="$RELEASE_VERSION"
+            RELEASE_TAG=""
+            if [ "$TARGET_REPO" != "CodeEagle/airflow" ]; then
+              RELEASE_TAG=$(gh api "repos/$UPSTREAM_REPO/releases/latest" --jq '.tag_name' 2>/dev/null || echo "")
+              RELEASE_VERSION="${RELEASE_TAG#v}"
+              if [ -n "$RELEASE_TAG" ] && is_semver "$RELEASE_VERSION"; then
+                SOURCE_VERSION="$RELEASE_TAG"
+                BUILD_VERSION="$RELEASE_VERSION"
+              fi
             fi
 
             if [ -z "$BUILD_VERSION" ]; then
