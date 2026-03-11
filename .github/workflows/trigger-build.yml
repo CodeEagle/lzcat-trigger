@@ -173,7 +173,23 @@ jobs:
           
           # 获取当前 manifest 中的版本
           MANIFEST_CONTENT=$(gh api repos/$TARGET_REPO/contents/lzc-manifest.yml --jq '.content' 2>/dev/null | base64 -d || echo "")
-          CURRENT_IMAGE=$(echo "$MANIFEST_CONTENT" | grep 'image:' | head -1 | awk '{print $2}')
+          CURRENT_IMAGE=$(MANIFEST_CONTENT="$MANIFEST_CONTENT" python3 - <<'PY'
+          import os
+          import re
+
+          content = os.environ.get("MANIFEST_CONTENT", "")
+          backend_match = re.search(r'backend:\s*https?://([A-Za-z0-9_.-]+):\d+/?', content)
+          service_name = backend_match.group(1) if backend_match else ""
+          if service_name:
+              image_match = re.search(
+                  rf'^\s{{2}}{re.escape(service_name)}:\n(?:\s{{4}}.*\n)*?\s{{4}}image:\s*([^\n]+)',
+                  content,
+                  re.MULTILINE,
+              )
+              if image_match:
+                  print(image_match.group(1))
+          PY
+          )
           CURRENT_VERSION=$(echo "$MANIFEST_CONTENT" | grep '^version:' | head -1 | awk '{print $2}')
           
           echo "Current image: $CURRENT_IMAGE"
@@ -452,15 +468,38 @@ jobs:
 
       - name: Update manifest
         if: steps.check-update.outputs.update_needed == 'true'
+        env:
+          ACCELERATED_URL: ${{ steps.copy-image.outputs.accelerated_url }}
+          BUILD_VERSION: ${{ steps.get-version.outputs.build_version }}
+          SOURCE_VERSION: ${{ steps.get-version.outputs.source_version }}
+          POSTGRES_URL: ${{ steps.deps-images.outputs.postgres_url }}
+          REDIS_URL: ${{ steps.deps-images.outputs.redis_url }}
         run: |
-          ACCELERATED_URL="${{ steps.copy-image.outputs.accelerated_url }}"
-          BUILD_VERSION="${{ steps.get-version.outputs.build_version }}"
-          SOURCE_VERSION="${{ steps.get-version.outputs.source_version }}"
-          POSTGRES_URL="${{ steps.deps-images.outputs.postgres_url }}"
-          REDIS_URL="${{ steps.deps-images.outputs.redis_url }}"
-          
           # 更新主镜像和版本
-          sed -i "0,/image: .*/s|image: .*|image: $ACCELERATED_URL|" lzc-manifest.yml
+          python3 - <<'PY'
+          from pathlib import Path
+          import os
+          import re
+
+          manifest_path = Path("lzc-manifest.yml")
+          content = manifest_path.read_text()
+
+          backend_match = re.search(r'backend:\s*https?://([A-Za-z0-9_.-]+):\d+/?', content)
+          if not backend_match:
+              raise SystemExit("Failed to detect primary backend service from application.upstreams")
+
+          service_name = backend_match.group(1)
+          accelerated_url = os.environ["ACCELERATED_URL"]
+          pattern = re.compile(
+              rf'(^\s{{2}}{re.escape(service_name)}:\n(?:\s{{4}}.*\n)*?\s{{4}}image:\s*)([^\n]+)',
+              re.MULTILINE,
+          )
+          updated, count = pattern.subn(r"\1" + accelerated_url, content, count=1)
+          if count != 1:
+              raise SystemExit(f"Failed to update services.{service_name}.image in lzc-manifest.yml")
+
+          manifest_path.write_text(updated)
+          PY
           sed -i "s|^version:.*|version: $BUILD_VERSION|g" lzc-manifest.yml
           
           # 更新 PostgreSQL 镜像地址
