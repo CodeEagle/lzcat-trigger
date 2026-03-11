@@ -136,7 +136,7 @@ jobs:
 
             if [ -z "$BUILD_VERSION" ]; then
               SOURCE_VERSION=$(gh api "repos/$UPSTREAM_REPO/commits/main" --jq '.sha[0:7]' 2>/dev/null || echo "latest")
-              if [ "$TARGET_REPO" = "CodeEagle/cutia" ]; then
+              if [ "$TARGET_REPO" = "CodeEagle/cutia" ] || [ "$TARGET_REPO" = "CodeEagle/Edit-Banana" ]; then
                 if is_semver "$CURRENT_BUILD_VERSION"; then
                   if [ "$SOURCE_VERSION" = "$CURRENT_SOURCE_VERSION" ]; then
                     BUILD_VERSION="$CURRENT_BUILD_VERSION"
