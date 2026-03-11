@@ -69,7 +69,7 @@ jobs:
             CodeEagle/GitNexus) UPSTREAM_REPO="abhigyanpatwari/GitNexus" ;;
             CodeEagle/airflow) UPSTREAM_REPO="apache/airflow" ;;
             CodeEagle/OpenFang) UPSTREAM_REPO="RightNow-AI/openfang" ;;
-            CodeEagle/waoowaoo) UPSTREAM_REPO="" ;;
+            CodeEagle/waoowaoo) UPSTREAM_REPO="waoowaooAI/waoowaoo" ;;
             CodeEagle/Moltis) UPSTREAM_REPO="" ;;
           esac
 
