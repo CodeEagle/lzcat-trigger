@@ -391,7 +391,6 @@ jobs:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
           GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
           GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
-          TARGET_RUN_HEAD_SHA: ${{ steps.wait-target-workflow.outputs.head_sha }}
         run: |
           TARGET_REPO="${{ inputs.target_repo }}"
           SOURCE_VERSION="${{ steps.get-version.outputs.source_version }}"
@@ -401,17 +400,9 @@ jobs:
 
           # Read current manifest image as a safe fallback when GHCR copy is unauthorized
           CURRENT_MANIFEST_IMAGE=$(gh api "repos/$TARGET_REPO/contents/lzc-manifest.yml" --jq '.content' 2>/dev/null | base64 -d | grep 'image:' | head -1 | awk '{print $2}' || echo "")
-          TARGET_RUN_MANIFEST_IMAGE=""
-          if [ -n "${TARGET_RUN_HEAD_SHA:-}" ]; then
-            TARGET_RUN_MANIFEST_IMAGE=$(gh api "repos/$TARGET_REPO/contents/lzc-manifest.yml?ref=$TARGET_RUN_HEAD_SHA" --jq '.content' 2>/dev/null | base64 -d | grep 'image:' | head -1 | awk '{print $2}' || echo "")
-          fi
-
-          if [[ "$TARGET_RUN_MANIFEST_IMAGE" == registry.lazycat.cloud/* ]]; then
-            ACCELERATED_URL="$TARGET_RUN_MANIFEST_IMAGE"
-            echo "Using image from triggered target workflow manifest: $ACCELERATED_URL"
-            echo "accelerated_url=$ACCELERATED_URL" >> $GITHUB_OUTPUT
-            echo "Image copied to: $ACCELERATED_URL"
-            exit 0
+          ALLOW_STALE_FALLBACK="true"
+          if [ "$FORCE_BUILD" = "true" ] || [ -n "$TARGET_VERSION" ]; then
+            ALLOW_STALE_FALLBACK="false"
           fi
           
           # 构造 ghcr.io 镜像地址
@@ -498,11 +489,11 @@ jobs:
           fi
           
           if [ -z "$ACCELERATED_URL" ]; then
-            if [[ "$CURRENT_MANIFEST_IMAGE" == registry.lazycat.cloud/* ]]; then
+            if [ "$ALLOW_STALE_FALLBACK" = "true" ] && [[ "$CURRENT_MANIFEST_IMAGE" == registry.lazycat.cloud/* ]]; then
               ACCELERATED_URL="$CURRENT_MANIFEST_IMAGE"
               echo "Falling back to current manifest image: $ACCELERATED_URL"
             else
-              echo "Failed to get accelerated URL"
+              echo "Failed to get accelerated URL (force build requires fresh image copy)"
               exit 1
             fi
           fi
