@@ -676,4 +676,4 @@ jobs:
             exit 0
           fi
           git commit -m "Update to version $BUILD_VERSION"
-          git push
+          git push origin HEAD:main
