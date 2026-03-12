@@ -551,6 +551,10 @@ jobs:
         run: |
           echo "Checked out commit: $(git rev-parse HEAD)"
           echo "Expected head_sha: ${{ steps.wait-target-workflow.outputs.head_sha }}"
+          echo "Working tree icon:"
+          ls -lh icon.png
+          file icon.png
+          shasum -a 256 icon.png
           sed -n '1,40p' lzc-manifest.yml
 
       - name: Update manifest
@@ -638,6 +642,10 @@ jobs:
           unzip -q "${PROJECT_NAME_LOWER}.lpk" -d "$TMP_DIR"
           echo "Packaged manifest upstreams:"
           sed -n '/^application:/,/^services:/p' "$TMP_DIR/manifest.yml"
+          echo "Packaged icon:"
+          ls -lh "$TMP_DIR/icon.png"
+          file "$TMP_DIR/icon.png"
+          shasum -a 256 "$TMP_DIR/icon.png"
 
       - name: Publish to LazyCat App Store
         if: steps.check-update.outputs.update_needed == 'true' && inputs.publish_to_store == true
