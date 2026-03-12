@@ -182,6 +182,18 @@ jobs:
             echo "Checking official image: $SOURCE_IMAGE"
             
             if docker manifest inspect "$SOURCE_IMAGE" 2>/dev/null; then
+              if [ "${{ inputs.force_build }}" != "true" ]; then
+                SOURCE_REPO=$(echo "$SOURCE_IMAGE" | awk -F'/' '{print $NF}' | awk -F':' '{print $1}')
+                EXISTING_IMAGE=$(lzc-cli appstore my-images 2>&1 | grep "${SOURCE_REPO}:${LATEST_VERSION}" | grep -oE 'registry\.lazycat\.cloud/[a-zA-Z0-9_/.:-]+' | head -1 || echo "")
+                if [ -n "$EXISTING_IMAGE" ]; then
+                  echo "Found existing official image cache: $EXISTING_IMAGE"
+                  echo "accelerated_url=$EXISTING_IMAGE" >> $GITHUB_OUTPUT
+                  exit 0
+                fi
+              else
+                echo "Force build enabled, skipping official image cache check"
+              fi
+
               echo "Official image found, copying..."
               COPY_OUTPUT=$(lzc-cli appstore copy-image "$SOURCE_IMAGE" 2>&1)
               echo "$COPY_OUTPUT"
