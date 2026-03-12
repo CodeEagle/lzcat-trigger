@@ -379,6 +379,9 @@ jobs:
           SOURCE_VERSION="${{ steps.get-version.outputs.source_version }}"
           FORCE_BUILD="${{ inputs.force_build }}"
           TARGET_VERSION="${{ inputs.target_version }}"
+
+          # Read current manifest image as a safe fallback when GHCR copy is unauthorized
+          CURRENT_MANIFEST_IMAGE=$(gh api "repos/$TARGET_REPO/contents/lzc-manifest.yml" --jq '.content' 2>/dev/null | base64 -d | grep 'image:' | head -1 | awk '{print $2}' || echo "")
           
           # 构造 ghcr.io 镜像地址
           OWNER=$(echo "$TARGET_REPO" | cut -d'/' -f1 | tr '[:upper:]' '[:lower:]')
@@ -454,8 +457,13 @@ jobs:
           fi
           
           if [ -z "$ACCELERATED_URL" ]; then
-            echo "Failed to get accelerated URL"
-            exit 1
+            if [[ "$CURRENT_MANIFEST_IMAGE" == registry.lazycat.cloud/* ]]; then
+              ACCELERATED_URL="$CURRENT_MANIFEST_IMAGE"
+              echo "Falling back to current manifest image: $ACCELERATED_URL"
+            else
+              echo "Failed to get accelerated URL"
+              exit 1
+            fi
           fi
           
           echo "accelerated_url=$ACCELERATED_URL" >> $GITHUB_OUTPUT
