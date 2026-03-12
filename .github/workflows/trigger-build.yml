@@ -46,6 +46,7 @@ jobs:
         run: |
           TARGET_VERSION="${{ inputs.target_version }}"
           TARGET_REPO="${{ inputs.target_repo }}"
+          FORCE_BUILD="${{ inputs.force_build }}"
 
           is_semver() {
             [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
@@ -154,6 +155,10 @@ jobs:
             else
               BUILD_VERSION="0.1.0"
             fi
+          fi
+
+          if [ "$FORCE_BUILD" = "true" ] && [ -z "$TARGET_VERSION" ] && is_semver "$CURRENT_BUILD_VERSION" && [ -n "$CURRENT_SOURCE_VERSION" ] && [ "$CURRENT_SOURCE_VERSION" = "$SOURCE_VERSION" ]; then
+            BUILD_VERSION=$(bump_patch "$CURRENT_BUILD_VERSION")
           fi
           
           echo "upstream_repo=$UPSTREAM_REPO" >> $GITHUB_OUTPUT
