@@ -158,8 +158,10 @@ jobs:
             fi
           fi
 
-          if [ "$FORCE_BUILD" = "true" ] && [ -z "$TARGET_VERSION" ] && is_semver "$CURRENT_BUILD_VERSION" && [ -n "$CURRENT_SOURCE_VERSION" ] && [ "$CURRENT_SOURCE_VERSION" = "$SOURCE_VERSION" ]; then
-            BUILD_VERSION=$(bump_patch "$CURRENT_BUILD_VERSION")
+          # Force rebuilds for semver upstreams should reuse the upstream version
+          # instead of inventing a new patch version in the migrated package.
+          if [ "$FORCE_BUILD" = "true" ] && [ -z "$TARGET_VERSION" ] && is_semver "$BUILD_VERSION"; then
+            BUILD_VERSION="$BUILD_VERSION"
           fi
 
           BUILD_LABEL="${SOURCE_VERSION}@${BUILD_TIMESTAMP}"
@@ -581,40 +583,69 @@ jobs:
           manifest_path = Path("lzc-manifest.yml")
           content = manifest_path.read_text()
 
-          backend_match = re.search(r'backend:\s*https?://([A-Za-z0-9_.-]+):\d+/?', content)
-          if not backend_match:
-              raise SystemExit("Failed to detect primary backend service from application.upstreams")
-
-          service_name = backend_match.group(1)
           accelerated_url = os.environ["ACCELERATED_URL"]
+          target_image_repo = accelerated_url.rsplit(":", 1)[0]
 
-          def update_service_image(text: str, name: str, image: str) -> str:
+          def update_service_image(text: str, name: str, image: str) -> tuple[str, int]:
               pattern = re.compile(
                   rf'(^\s{{2}}{re.escape(name)}:\n(?:\s{{4}}.*\n)*?\s{{4}}image:\s*)([^\n]+)',
                   re.MULTILINE,
               )
-              updated_text, count = pattern.subn(r"\1" + image, text, count=1)
-              if count != 1:
-                  raise SystemExit(f"Failed to update services.{name}.image in lzc-manifest.yml")
-              return updated_text
+              return pattern.subn(r"\1" + image, text, count=1)
 
-          content = update_service_image(content, service_name, accelerated_url)
+          services_match = re.search(r'(^services:\n(?:.*\n)*)', content, re.MULTILINE)
+          if not services_match:
+              raise SystemExit("Failed to detect services block in lzc-manifest.yml")
+
+          service_names = re.findall(r'^\s{2}([A-Za-z0-9_.-]+):\s*$', content, re.MULTILINE)
+          updated_any = False
+          for service_name in service_names:
+              image_match = re.search(
+                  rf'^\s{{2}}{re.escape(service_name)}:\n(?:\s{{4}}.*\n)*?\s{{4}}image:\s*([^\n]+)',
+                  content,
+                  re.MULTILINE,
+              )
+              if not image_match:
+                  continue
+              current_image = image_match.group(1).strip()
+              current_repo = current_image.rsplit(":", 1)[0]
+              if current_repo == target_image_repo:
+                  content, count = update_service_image(content, service_name, accelerated_url)
+                  if count == 1:
+                      updated_any = True
+
+          if not updated_any:
+              backend_match = re.search(r'backend:\s*https?://([A-Za-z0-9_.-]+):\d+/?', content)
+              if not backend_match:
+                  raise SystemExit("Failed to detect primary backend service from application.upstreams")
+              service_name = backend_match.group(1)
+              content, count = update_service_image(content, service_name, accelerated_url)
+              if count != 1:
+                  raise SystemExit(f"Failed to update services.{service_name}.image in lzc-manifest.yml")
 
           backend_url = os.environ.get("BACKEND_URL", "").strip()
           if backend_url:
-              content = update_service_image(content, "api", backend_url)
+              content, count = update_service_image(content, "api", backend_url)
+              if count != 1:
+                  raise SystemExit("Failed to update services.api.image in lzc-manifest.yml")
 
           postgres_url = os.environ.get("POSTGRES_URL", "").strip()
           if postgres_url:
-              content = update_service_image(content, "postgres", postgres_url)
+              content, count = update_service_image(content, "postgres", postgres_url)
+              if count != 1:
+                  raise SystemExit("Failed to update services.postgres.image in lzc-manifest.yml")
 
           redis_url = os.environ.get("REDIS_URL", "").strip()
           if redis_url:
-              content = update_service_image(content, "redis", redis_url)
+              content, count = update_service_image(content, "redis", redis_url)
+              if count != 1:
+                  raise SystemExit("Failed to update services.redis.image in lzc-manifest.yml")
 
           minio_url = os.environ.get("MINIO_URL", "").strip()
           if minio_url:
-              content = update_service_image(content, "minio", minio_url)
+              content, count = update_service_image(content, "minio", minio_url)
+              if count != 1:
+                  raise SystemExit("Failed to update services.minio.image in lzc-manifest.yml")
 
           manifest_path.write_text(content)
           PY
