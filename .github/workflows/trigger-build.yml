@@ -217,6 +217,8 @@ jobs:
           script: |
             const targetRepo = '${{ inputs.target_repo }}';
             const targetWorkflow = '${{ inputs.target_workflow }}';
+            const owner = targetRepo.split('/')[0];
+            const repo = targetRepo.split('/')[1];
             
             const inputs = {};
             if ('${{ inputs.force_build }}' === 'true') inputs.force_build = true;
@@ -226,24 +228,33 @@ jobs:
             console.log('On repository:', targetRepo);
             
             const workflows = await github.rest.actions.listRepoWorkflows({
-              owner: targetRepo.split('/')[0],
-              repo: targetRepo.split('/')[1]
+              owner,
+              repo
             });
             
             const workflow = workflows.data.workflows.find(w => w.path.endsWith(targetWorkflow));
             if (!workflow) {
               throw new Error(`Workflow not found: ${targetWorkflow}`);
             }
+
+            const beforeRuns = await github.rest.actions.listWorkflowRuns({
+              owner,
+              repo,
+              workflow_id: workflow.id,
+              per_page: 30
+            });
+            const beforeIds = beforeRuns.data.workflow_runs.map(r => String(r.id));
             
             await github.rest.actions.createWorkflowDispatch({
-              owner: targetRepo.split('/')[0],
-              repo: targetRepo.split('/')[1],
+              owner,
+              repo,
               workflow_id: workflow.id,
               ref: 'main',
               inputs: inputs
             });
             
             core.setOutput('workflow_id', workflow.id);
+            core.setOutput('before_run_ids', beforeIds.join(','));
             console.log('Workflow triggered');
 
       - name: Wait for workflow completion
@@ -254,23 +265,26 @@ jobs:
           script: |
             const targetRepo = '${{ inputs.target_repo }}';
             const workflowId = '${{ steps.trigger.outputs.workflow_id }}';
+            const beforeRunIds = new Set('${{ steps.trigger.outputs.before_run_ids }}'.split(',').filter(Boolean));
+            const owner = targetRepo.split('/')[0];
+            const repo = targetRepo.split('/')[1];
             
-            console.log('Waiting for workflow...');
+            console.log('Waiting for newly triggered workflow run...');
             
             let run;
-            for (let i = 0; i < 30; i++) {
+            for (let i = 0; i < 90; i++) {
               const runs = await github.rest.actions.listWorkflowRuns({
-                owner: targetRepo.split('/')[0],
-                repo: targetRepo.split('/')[1],
+                owner,
+                repo,
                 workflow_id: parseInt(workflowId),
-                per_page: 1
+                per_page: 30
               });
-              
-              if (runs.data.workflow_runs.length > 0) {
-                run = runs.data.workflow_runs[0];
+
+              run = runs.data.workflow_runs.find(r => !beforeRunIds.has(String(r.id)));
+              if (run) {
                 break;
               }
-              
+
               await new Promise(r => setTimeout(r, 2000));
             }
             
@@ -282,8 +296,8 @@ jobs:
             while (status !== 'completed') {
               await new Promise(r => setTimeout(r, 10000));
               const runData = await github.rest.actions.getWorkflowRun({
-                owner: targetRepo.split('/')[0],
-                repo: targetRepo.split('/')[1],
+                owner,
+                repo,
                 run_id: run.id
               });
               status = runData.data.status;
@@ -291,8 +305,8 @@ jobs:
             }
             
             const conclusion = (await github.rest.actions.getWorkflowRun({
-              owner: targetRepo.split('/')[0],
-              repo: targetRepo.split('/')[1],
+              owner,
+              repo,
               run_id: run.id
             })).data.conclusion;
             
