@@ -424,8 +424,7 @@ jobs:
               GHCR_IMAGE="ghcr.io/${OWNER}/${REPO}:${TAG}"
               echo "Trying image: $GHCR_IMAGE"
               if ! docker pull "$GHCR_IMAGE"; then
-                echo "Pull failed for $GHCR_IMAGE"
-                continue
+                echo "Pull failed for $GHCR_IMAGE, trying direct copy via lzc-cli"
               fi
 
               set +e
