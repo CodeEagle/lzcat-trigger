@@ -630,7 +630,7 @@ jobs:
         run: |
           PROJECT_NAME_LOWER=$(basename ${{ inputs.target_repo }})
           TMP_DIR=$(mktemp -d)
-          tar -xf "${PROJECT_NAME_LOWER}.lpk" -C "$TMP_DIR"
+          unzip -q "${PROJECT_NAME_LOWER}.lpk" -d "$TMP_DIR"
           echo "Packaged manifest upstreams:"
           sed -n '/^application:/,/^services:/p' "$TMP_DIR/manifest.yml"
 
