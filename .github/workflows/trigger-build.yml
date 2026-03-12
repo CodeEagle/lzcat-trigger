@@ -34,6 +34,7 @@ jobs:
     permissions:
       contents: write
       actions: write
+      packages: read
     steps:
       - name: Checkout trigger repository
         uses: actions/checkout@v4
@@ -371,6 +372,8 @@ jobs:
         env:
           LZC_CLI_TOKEN: ${{ secrets.LZC_CLI_TOKEN }}
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GHCR_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_USERNAME: ${{ github.actor }}
         run: |
           TARGET_REPO="${{ inputs.target_repo }}"
           SOURCE_VERSION="${{ steps.get-version.outputs.source_version }}"
@@ -414,7 +417,7 @@ jobs:
             if [ -n "$EXISTING_ACCELERATED_URL" ]; then
               echo "Skipping image reuse because force rebuild or explicit target version was requested"
             fi
-            echo "$GH_TOKEN" | docker login ghcr.io -u "$OWNER" --password-stdin
+            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
             ACCELERATED_URL=""
             COPY_STATUS=1
             for TAG in "${TAG_CANDIDATES[@]}"; do
