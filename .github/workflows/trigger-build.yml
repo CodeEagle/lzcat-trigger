@@ -47,6 +47,7 @@ jobs:
           TARGET_VERSION="${{ inputs.target_version }}"
           TARGET_REPO="${{ inputs.target_repo }}"
           FORCE_BUILD="${{ inputs.force_build }}"
+          BUILD_TIMESTAMP=$(date -u +%Y%m%dT%H%M%SZ)
 
           is_semver() {
             [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
@@ -160,11 +161,14 @@ jobs:
           if [ "$FORCE_BUILD" = "true" ] && [ -z "$TARGET_VERSION" ] && is_semver "$CURRENT_BUILD_VERSION" && [ -n "$CURRENT_SOURCE_VERSION" ] && [ "$CURRENT_SOURCE_VERSION" = "$SOURCE_VERSION" ]; then
             BUILD_VERSION=$(bump_patch "$CURRENT_BUILD_VERSION")
           fi
+
+          BUILD_LABEL="${SOURCE_VERSION}@${BUILD_TIMESTAMP}"
           
           echo "upstream_repo=$UPSTREAM_REPO" >> $GITHUB_OUTPUT
           echo "source_version=$SOURCE_VERSION" >> $GITHUB_OUTPUT
           echo "build_version=$BUILD_VERSION" >> $GITHUB_OUTPUT
-          echo "Upstream: $UPSTREAM_REPO, Source: $SOURCE_VERSION, Version: $BUILD_VERSION"
+          echo "build_label=$BUILD_LABEL" >> $GITHUB_OUTPUT
+          echo "Upstream: $UPSTREAM_REPO, Source: $SOURCE_VERSION, Version: $BUILD_VERSION, Label: $BUILD_LABEL"
 
       - name: Check if update needed
         id: check-update
@@ -622,7 +626,8 @@ jobs:
           cat > .lazycat-build.json <<EOF
           {
             "source_version": "$SOURCE_VERSION",
-            "build_version": "$BUILD_VERSION"
+            "build_version": "$BUILD_VERSION",
+            "build_label": "${{ steps.get-version.outputs.build_label }}"
           }
           EOF
 
@@ -663,13 +668,14 @@ jobs:
         run: |
           BUILD_VERSION="${{ steps.get-version.outputs.build_version }}"
           SOURCE_VERSION="${{ steps.get-version.outputs.source_version }}"
+          BUILD_LABEL="${{ steps.get-version.outputs.build_label }}"
           PROJECT_NAME_LOWER=$(basename ${{ inputs.target_repo }})
           
           gh release delete "v$BUILD_VERSION" --repo ${{ inputs.target_repo }} --yes 2>/dev/null || true
           gh release create "v$BUILD_VERSION" \
             --repo ${{ inputs.target_repo }} \
             --title "v$BUILD_VERSION" \
-            --notes "Auto-built version $BUILD_VERSION (source: $SOURCE_VERSION)" \
+            --notes "Auto-built version $BUILD_VERSION (source: $SOURCE_VERSION, label: $BUILD_LABEL)" \
             ${PROJECT_NAME_LOWER}.lpk
 
       - name: Commit and push changes
