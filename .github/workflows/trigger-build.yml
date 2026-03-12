@@ -137,23 +137,23 @@ jobs:
 
             if [ -z "$BUILD_VERSION" ]; then
               SOURCE_VERSION=$(gh api "repos/$UPSTREAM_REPO/commits/main" --jq '.sha[0:7]' 2>/dev/null || echo "latest")
-              if [ "$TARGET_REPO" = "CodeEagle/cutia" ] || [ "$TARGET_REPO" = "CodeEagle/Edit-Banana" ]; then
-                if is_semver "$CURRENT_BUILD_VERSION"; then
-                  if [ "$SOURCE_VERSION" = "$CURRENT_SOURCE_VERSION" ]; then
-                    BUILD_VERSION="$CURRENT_BUILD_VERSION"
-                  else
-                    BUILD_VERSION=$(bump_patch "$CURRENT_BUILD_VERSION")
-                  fi
+              if is_semver "$CURRENT_BUILD_VERSION"; then
+                if [ "$SOURCE_VERSION" = "$CURRENT_SOURCE_VERSION" ]; then
+                  BUILD_VERSION="$CURRENT_BUILD_VERSION"
                 else
-                  BUILD_VERSION="0.1.0"
+                  BUILD_VERSION=$(bump_patch "$CURRENT_BUILD_VERSION")
                 fi
               else
-                BUILD_VERSION="$SOURCE_VERSION"
+                BUILD_VERSION="0.1.0"
               fi
             fi
           else
             SOURCE_VERSION=$(date +%Y%m%d%H%M%S)
-            BUILD_VERSION="$SOURCE_VERSION"
+            if is_semver "$CURRENT_BUILD_VERSION"; then
+              BUILD_VERSION=$(bump_patch "$CURRENT_BUILD_VERSION")
+            else
+              BUILD_VERSION="0.1.0"
+            fi
           fi
           
           echo "upstream_repo=$UPSTREAM_REPO" >> $GITHUB_OUTPUT
@@ -538,6 +538,15 @@ jobs:
         with:
           repository: ${{ inputs.target_repo }}
           token: ${{ secrets.GH_TOKEN }}
+          ref: ${{ steps.wait-target-workflow.outputs.head_sha }}
+          fetch-depth: 1
+
+      - name: Show checked out target revision
+        if: steps.check-update.outputs.update_needed == 'true'
+        run: |
+          echo "Checked out commit: $(git rev-parse HEAD)"
+          echo "Expected head_sha: ${{ steps.wait-target-workflow.outputs.head_sha }}"
+          sed -n '1,40p' lzc-manifest.yml
 
       - name: Update manifest
         if: steps.check-update.outputs.update_needed == 'true'
@@ -615,6 +624,15 @@ jobs:
         run: |
           PROJECT_NAME_LOWER=$(basename ${{ inputs.target_repo }})
           lzc-cli project build -o ${PROJECT_NAME_LOWER}.lpk
+
+      - name: Verify packaged manifest
+        if: steps.check-update.outputs.update_needed == 'true'
+        run: |
+          PROJECT_NAME_LOWER=$(basename ${{ inputs.target_repo }})
+          TMP_DIR=$(mktemp -d)
+          tar -xf "${PROJECT_NAME_LOWER}.lpk" -C "$TMP_DIR"
+          echo "Packaged manifest upstreams:"
+          sed -n '/^application:/,/^services:/p' "$TMP_DIR/manifest.yml"
 
       - name: Publish to LazyCat App Store
         if: steps.check-update.outputs.update_needed == 'true' && inputs.publish_to_store == true
