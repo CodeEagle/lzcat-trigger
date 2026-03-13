@@ -207,8 +207,24 @@ def update_service_image(manifest_text: str, service_name: str, image: str) -> t
     return pattern.subn(r"\1" + image, manifest_text, count=1)
 
 
+def strip_ansi(text: str) -> str:
+    return re.sub(r"\x1b\[[0-9;?]*[ -/]*[@-~]", "", text).replace("\r", "\n")
+
+
 def copy_image_to_lazycat(source_image: str, env: dict[str, str]) -> str:
-    output = sh(["lzc-cli", "appstore", "copy-image", source_image], env=env)
+    result = subprocess.run(
+        ["lzc-cli", "appstore", "copy-image", source_image],
+        env=env,
+        text=True,
+        capture_output=True,
+        check=False,
+    )
+    output = strip_ansi(f"{result.stdout}\n{result.stderr}").strip()
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"Command failed ({result.returncode}): lzc-cli appstore copy-image {source_image}\n"
+            f"output:\n{output}"
+        )
     match = re.search(r"(registry\.lazycat\.cloud/[A-Za-z0-9_/.:-]+)", output)
     if not match:
         raise RuntimeError(f"Failed to extract LazyCat image from output:\n{output}")
