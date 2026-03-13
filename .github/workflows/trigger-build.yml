@@ -4,709 +4,119 @@ on:
   workflow_dispatch:
     inputs:
       target_repo:
-        description: 'Target repository (e.g., CodeEagle/cutia)'
-        required: true
-        type: string
-      target_workflow:
-        description: 'Target workflow filename'
+        description: "Target repository (leave empty to process all enabled repos)"
         required: false
-        default: 'update-image.yml'
+        default: ""
+        type: string
+      target_version:
+        description: "Target upstream version to build. Leave empty for latest."
+        required: false
+        default: ""
         type: string
       force_build:
-        description: 'Force build'
+        description: "Force build regardless of current source version"
         required: false
         default: false
         type: boolean
-      target_version:
-        description: 'Target version'
-        required: false
-        default: ''
-        type: string
       publish_to_store:
-        description: 'Publish to LazyCat App Store'
+        description: "Publish generated package to LazyCat App Store"
         required: false
         default: false
         type: boolean
+      check_only:
+        description: "Only check whether an update is needed"
+        required: false
+        default: false
+        type: boolean
+      config_repo:
+        description: "Repository holding repo configs"
+        required: false
+        default: "CodeEagle/lzcat-registry"
+        type: string
+      config_ref:
+        description: "Branch or tag of the config repository"
+        required: false
+        default: "main"
+        type: string
+      artifact_repo:
+        description: "Central repository to store LPK artifacts and build reports"
+        required: false
+        default: "CodeEagle/lzcat-artifacts"
+        type: string
+  repository_dispatch:
+    types:
+      - lzcat-build
+  schedule:
+    - cron: "0 */12 * * *"
 
 jobs:
-  build-and-copy:
+  prepare:
     runs-on: ubuntu-latest
-    permissions:
-      contents: write
-      actions: write
-      packages: read
+    outputs:
+      matrix: ${{ steps.collect.outputs.matrix }}
+      has_targets: ${{ steps.collect.outputs.has_targets }}
+      config_repo: ${{ steps.resolve.outputs.config_repo }}
+      config_ref: ${{ steps.resolve.outputs.config_ref }}
+      artifact_repo: ${{ steps.resolve.outputs.artifact_repo }}
     steps:
       - name: Checkout trigger repository
         uses: actions/checkout@v4
 
-      - name: Get upstream version
-        id: get-version
+      - name: Resolve config source
+        id: resolve
         env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          INPUT_CONFIG_REPO: ${{ inputs.config_repo }}
+          INPUT_CONFIG_REF: ${{ inputs.config_ref }}
         run: |
-          TARGET_VERSION="${{ inputs.target_version }}"
-          TARGET_REPO="${{ inputs.target_repo }}"
-          FORCE_BUILD="${{ inputs.force_build }}"
-          BUILD_TIMESTAMP=$(date -u +%Y%m%dT%H%M%SZ)
-
-          is_semver() {
-            [[ "$1" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
-          }
-
-          bump_patch() {
-            local version="$1"
-            local major minor patch
-            IFS='.' read -r major minor patch <<< "$version"
-            echo "${major}.${minor}.$((patch + 1))"
-          }
-          
-          # 从目标仓库获取上游仓库信息
-          UPSTREAM_REPO=$(gh api repos/$TARGET_REPO/contents/README.md --jq '.content' 2>/dev/null | base64 -d | grep -oE 'github\.com/[^/]+/[^/) ]+' | head -1 | sed 's|github.com/||' || echo "")
-          
-          # 硬编码上游仓库映射
-          case "$TARGET_REPO" in
-            CodeEagle/cutia) UPSTREAM_REPO="msgbyte/cutia" ;;
-            CodeEagle/Higress) UPSTREAM_REPO="alibaba/higress" ;;
-            CodeEagle/chatgpt-on-wechat) UPSTREAM_REPO="zhayujie/chatgpt-on-wechat" ;;
-            CodeEagle/chatgpt-on-wechat-lazycat) UPSTREAM_REPO="zhayujie/chatgpt-on-wechat" ;;
-            CodeEagle/GitNexus) UPSTREAM_REPO="abhigyanpatwari/GitNexus" ;;
-            CodeEagle/airflow) UPSTREAM_REPO="apache/airflow" ;;
-            CodeEagle/OpenFang) UPSTREAM_REPO="RightNow-AI/openfang" ;;
-            CodeEagle/waoowaoo) UPSTREAM_REPO="waoowaooAI/waoowaoo" ;;
-            CodeEagle/Moltis) UPSTREAM_REPO="" ;;
-          esac
-
-          MANIFEST_CONTENT=$(gh api repos/$TARGET_REPO/contents/lzc-manifest.yml --jq '.content' 2>/dev/null | base64 -d || echo "")
-          CURRENT_VERSION=$(echo "$MANIFEST_CONTENT" | grep '^version:' | head -1 | awk '{print $2}')
-          META_CONTENT=$(gh api repos/$TARGET_REPO/contents/.lazycat-build.json --jq '.content' 2>/dev/null | base64 -d || echo "{}")
-          CURRENT_BUILD_VERSION=$(echo "$META_CONTENT" | jq -r '.build_version // empty' 2>/dev/null || echo "")
-          CURRENT_SOURCE_VERSION=$(echo "$META_CONTENT" | jq -r '.source_version // empty' 2>/dev/null || echo "")
-
-          if [ -z "$CURRENT_BUILD_VERSION" ]; then
-            CURRENT_BUILD_VERSION="$CURRENT_VERSION"
+          CONFIG_REPO="${INPUT_CONFIG_REPO:-CodeEagle/lzcat-registry}"
+          CONFIG_REF="${INPUT_CONFIG_REF:-main}"
+          ARTIFACT_REPO="${{ inputs.artifact_repo }}"
+          if [ -z "$ARTIFACT_REPO" ]; then
+            ARTIFACT_REPO="CodeEagle/lzcat-artifacts"
           fi
-          
-          if [ -n "$TARGET_VERSION" ]; then
-            SOURCE_VERSION="$TARGET_VERSION"
-            BUILD_VERSION="$TARGET_VERSION"
-          elif [ "$TARGET_REPO" = "CodeEagle/airflow" ] && [ -n "$CURRENT_VERSION" ]; then
-            SOURCE_VERSION="$CURRENT_VERSION"
-            BUILD_VERSION="$CURRENT_VERSION"
-          elif [ -n "$UPSTREAM_REPO" ]; then
-            BUILD_VERSION=""
-            SOURCE_VERSION=""
+          echo "config_repo=${CONFIG_REPO}" >> "$GITHUB_OUTPUT"
+          echo "config_ref=${CONFIG_REF}" >> "$GITHUB_OUTPUT"
+          echo "artifact_repo=${ARTIFACT_REPO}" >> "$GITHUB_OUTPUT"
 
-            RELEASE_TAG=""
-            if [ "$TARGET_REPO" != "CodeEagle/airflow" ]; then
-              RELEASE_TAG=$(gh api "repos/$UPSTREAM_REPO/releases/latest" --jq '.tag_name' 2>/dev/null || echo "")
-              RELEASE_VERSION="${RELEASE_TAG#v}"
-              if [ -n "$RELEASE_TAG" ] && is_semver "$RELEASE_VERSION"; then
-                SOURCE_VERSION="$RELEASE_TAG"
-                BUILD_VERSION="$RELEASE_VERSION"
-              fi
-            fi
-
-            if [ -z "$BUILD_VERSION" ]; then
-              TAG_NAME=$(gh api "repos/$UPSTREAM_REPO/tags?per_page=20" --jq '.[].name' 2>/dev/null | while read -r tag; do
-                norm="${tag#v}"
-                if [[ "$norm" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-                  echo "$tag"
-                  break
-                fi
-              done)
-              if [ -n "$TAG_NAME" ]; then
-                SOURCE_VERSION="$TAG_NAME"
-                BUILD_VERSION="${TAG_NAME#v}"
-              fi
-            fi
-
-            if [ -z "$BUILD_VERSION" ]; then
-              for changelog_file in CHANGELOG.md CHANGELOG changelog.md HISTORY.md RELEASE.md; do
-                CHANGELOG_CONTENT=$(gh api "repos/$UPSTREAM_REPO/contents/$changelog_file" --jq '.content' 2>/dev/null | base64 -d 2>/dev/null || true)
-                if [ -n "$CHANGELOG_CONTENT" ]; then
-                  CHANGELOG_VERSION=$(echo "$CHANGELOG_CONTENT" | grep -m1 -E '^##\s+\[?v?[0-9]+\.[0-9]+' | sed -E 's/^##\s+\[?v?([0-9]+\.[0-9]+(\.[0-9]+)?).*/\1/' | head -1 || true)
-                  if [ -n "$CHANGELOG_VERSION" ]; then
-                    if [[ ! "$CHANGELOG_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-                      CHANGELOG_VERSION="${CHANGELOG_VERSION}.0"
-                    fi
-                    SOURCE_VERSION="$CHANGELOG_VERSION"
-                    BUILD_VERSION="$CHANGELOG_VERSION"
-                    break
-                  fi
-                fi
-              done
-            fi
-
-            if [ -z "$BUILD_VERSION" ]; then
-              SOURCE_VERSION=$(gh api "repos/$UPSTREAM_REPO/commits/main" --jq '.sha[0:7]' 2>/dev/null || echo "latest")
-              if is_semver "$CURRENT_BUILD_VERSION"; then
-                if [ "$SOURCE_VERSION" = "$CURRENT_SOURCE_VERSION" ]; then
-                  BUILD_VERSION="$CURRENT_BUILD_VERSION"
-                else
-                  BUILD_VERSION=$(bump_patch "$CURRENT_BUILD_VERSION")
-                fi
-              else
-                BUILD_VERSION="0.1.0"
-              fi
-            fi
-          else
-            SOURCE_VERSION=$(date +%Y%m%d%H%M%S)
-            if is_semver "$CURRENT_BUILD_VERSION"; then
-              BUILD_VERSION=$(bump_patch "$CURRENT_BUILD_VERSION")
-            else
-              BUILD_VERSION="0.1.0"
-            fi
-          fi
-
-          # Force rebuilds for semver upstreams should reuse the upstream version
-          # instead of inventing a new patch version in the migrated package.
-          if [ "$FORCE_BUILD" = "true" ] && [ -z "$TARGET_VERSION" ] && is_semver "$BUILD_VERSION"; then
-            BUILD_VERSION="$BUILD_VERSION"
-          fi
-
-          BUILD_LABEL="${SOURCE_VERSION}@${BUILD_TIMESTAMP}"
-          
-          echo "upstream_repo=$UPSTREAM_REPO" >> $GITHUB_OUTPUT
-          echo "source_version=$SOURCE_VERSION" >> $GITHUB_OUTPUT
-          echo "build_version=$BUILD_VERSION" >> $GITHUB_OUTPUT
-          echo "build_label=$BUILD_LABEL" >> $GITHUB_OUTPUT
-          echo "Upstream: $UPSTREAM_REPO, Source: $SOURCE_VERSION, Version: $BUILD_VERSION, Label: $BUILD_LABEL"
-
-      - name: Check if update needed
-        id: check-update
+      - name: Checkout config repository
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          CONFIG_REPO: ${{ steps.resolve.outputs.config_repo }}
+          CONFIG_REF: ${{ steps.resolve.outputs.config_ref }}
         run: |
-          TARGET_REPO="${{ inputs.target_repo }}"
-          BUILD_VERSION="${{ steps.get-version.outputs.build_version }}"
-          SOURCE_VERSION="${{ steps.get-version.outputs.source_version }}"
-          FORCE_BUILD="${{ inputs.force_build }}"
-          TARGET_VERSION="${{ inputs.target_version }}"
-          
-          # 获取当前 manifest 中的版本
-          MANIFEST_CONTENT=$(gh api repos/$TARGET_REPO/contents/lzc-manifest.yml --jq '.content' 2>/dev/null | base64 -d || echo "")
-          CURRENT_IMAGE=$(MANIFEST_CONTENT="$MANIFEST_CONTENT" python3 - <<'PY'
-          import os
-          import re
+          git clone --depth=1 --branch "$CONFIG_REF" "https://x-access-token:${GH_TOKEN}@github.com/${CONFIG_REPO}.git" "$RUNNER_TEMP/lzcat-config"
 
-          content = os.environ.get("MANIFEST_CONTENT", "")
-          backend_match = re.search(r'backend:\s*https?://([A-Za-z0-9_.-]+):\d+/?', content)
-          service_name = backend_match.group(1) if backend_match else ""
-          if service_name:
-              image_match = re.search(
-                  rf'^\s{{2}}{re.escape(service_name)}:\n(?:\s{{4}}.*\n)*?\s{{4}}image:\s*([^\n]+)',
-                  content,
-                  re.MULTILINE,
-              )
-              if image_match:
-                  print(image_match.group(1))
-          PY
-          )
-          CURRENT_VERSION=$(echo "$MANIFEST_CONTENT" | grep '^version:' | head -1 | awk '{print $2}')
-          
-          echo "Current image: $CURRENT_IMAGE"
-          echo "Current version: $CURRENT_VERSION"
-          
-          if [ -n "$TARGET_VERSION" ]; then
-            echo "update_needed=true" >> $GITHUB_OUTPUT
-          elif [ "$FORCE_BUILD" = "true" ]; then
-            echo "update_needed=true" >> $GITHUB_OUTPUT
-          elif [ -n "$CURRENT_SOURCE_VERSION" ] && [ -n "$SOURCE_VERSION" ] && [ "$CURRENT_SOURCE_VERSION" != "$SOURCE_VERSION" ]; then
-            echo "update_needed=true" >> $GITHUB_OUTPUT
-          elif [ -z "$CURRENT_SOURCE_VERSION" ] && [ -n "$BUILD_VERSION" ] && [ "$CURRENT_VERSION" != "$BUILD_VERSION" ]; then
-            echo "update_needed=true" >> $GITHUB_OUTPUT
-          else
-            echo "update_needed=false" >> $GITHUB_OUTPUT
-          fi
-
-      - name: Trigger target workflow
-        if: steps.check-update.outputs.update_needed == 'true'
-        id: trigger
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.GH_TOKEN }}
-          script: |
-            const targetRepo = '${{ inputs.target_repo }}';
-            const targetWorkflow = '${{ inputs.target_workflow }}';
-            const owner = targetRepo.split('/')[0];
-            const repo = targetRepo.split('/')[1];
-            
-            const inputs = {};
-            if ('${{ inputs.force_build }}' === 'true') inputs.force_build = true;
-            if ('${{ steps.get-version.outputs.source_version }}') inputs.target_version = '${{ steps.get-version.outputs.source_version }}';
-            
-            console.log('Triggering workflow:', targetWorkflow);
-            console.log('On repository:', targetRepo);
-            
-            const workflows = await github.rest.actions.listRepoWorkflows({
-              owner,
-              repo
-            });
-            
-            const workflow = workflows.data.workflows.find(w => w.path.endsWith(targetWorkflow));
-            if (!workflow) {
-              throw new Error(`Workflow not found: ${targetWorkflow}`);
-            }
-
-            const beforeRuns = await github.rest.actions.listWorkflowRuns({
-              owner,
-              repo,
-              workflow_id: workflow.id,
-              per_page: 30
-            });
-            const beforeIds = beforeRuns.data.workflow_runs.map(r => String(r.id));
-            
-            await github.rest.actions.createWorkflowDispatch({
-              owner,
-              repo,
-              workflow_id: workflow.id,
-              ref: 'main',
-              inputs: inputs
-            });
-            
-            core.setOutput('workflow_id', workflow.id);
-            core.setOutput('before_run_ids', beforeIds.join(','));
-            console.log('Workflow triggered');
-
-      - name: Wait for workflow completion
-        if: steps.check-update.outputs.update_needed == 'true'
-        id: wait-target-workflow
-        uses: actions/github-script@v7
-        with:
-          github-token: ${{ secrets.GH_TOKEN }}
-          script: |
-            const targetRepo = '${{ inputs.target_repo }}';
-            const workflowId = '${{ steps.trigger.outputs.workflow_id }}';
-            const beforeRunIds = new Set('${{ steps.trigger.outputs.before_run_ids }}'.split(',').filter(Boolean));
-            const owner = targetRepo.split('/')[0];
-            const repo = targetRepo.split('/')[1];
-            
-            console.log('Waiting for newly triggered workflow run...');
-            
-            let run;
-            for (let i = 0; i < 90; i++) {
-              const runs = await github.rest.actions.listWorkflowRuns({
-                owner,
-                repo,
-                workflow_id: parseInt(workflowId),
-                per_page: 30
-              });
-
-              run = runs.data.workflow_runs.find(r => !beforeRunIds.has(String(r.id)));
-              if (run) {
-                break;
-              }
-
-              await new Promise(r => setTimeout(r, 2000));
-            }
-            
-            if (!run) throw new Error('Workflow run not found');
-            
-            console.log('Run ID:', run.id);
-            
-            let status = run.status;
-            while (status !== 'completed') {
-              await new Promise(r => setTimeout(r, 10000));
-              const runData = await github.rest.actions.getWorkflowRun({
-                owner,
-                repo,
-                run_id: run.id
-              });
-              status = runData.data.status;
-              console.log('Status:', status);
-            }
-            
-            const conclusion = (await github.rest.actions.getWorkflowRun({
-              owner,
-              repo,
-              run_id: run.id
-            })).data.conclusion;
-            
-            if (conclusion !== 'success') {
-              throw new Error(`Workflow failed: ${conclusion}`);
-            }
-            core.setOutput('run_id', String(run.id));
-            core.setOutput('head_sha', run.head_sha || '');
-            core.setOutput('conclusion', conclusion || '');
-            console.log('Workflow completed successfully');
-
-      - name: Setup Node.js
-        if: steps.check-update.outputs.update_needed == 'true'
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Install lzc-cli
-        if: steps.check-update.outputs.update_needed == 'true'
-        run: npm install -g @lazycatcloud/lzc-cli
-
-      - name: Copy dependency images
-        if: steps.check-update.outputs.update_needed == 'true'
-        id: deps-images
+      - name: Collect targets
+        id: collect
         env:
-          LZC_CLI_TOKEN: ${{ secrets.LZC_CLI_TOKEN }}
+          CONFIG_ROOT: ${{ runner.temp }}/lzcat-config
+          INPUT_TARGET_REPO: ${{ inputs.target_repo }}
+          INPUT_TARGET_VERSION: ${{ inputs.target_version }}
+          INPUT_FORCE_BUILD: ${{ inputs.force_build }}
+          INPUT_PUBLISH_TO_STORE: ${{ inputs.publish_to_store }}
+          INPUT_CHECK_ONLY: ${{ inputs.check_only }}
         run: |
-          TARGET_REPO="${{ inputs.target_repo }}"
-          
-          # 根据目标仓库确定需要的依赖镜像
-          case "$TARGET_REPO" in
-            CodeEagle/cutia)
-              echo "Processing PostgreSQL..."
-              POSTGRES_EXISTING=$(lzc-cli appstore my-images 2>&1 | grep "postgres:16-alpine" | grep -oE 'registry\.lazycat\.cloud/[a-zA-Z0-9_/.:-]+postgres[a-zA-Z0-9_/.:-]+' | head -1 || echo "")
-              if [ -n "$POSTGRES_EXISTING" ]; then
-                POSTGRES_URL="$POSTGRES_EXISTING"
-              else
-                COPY_OUTPUT=$(lzc-cli appstore copy-image postgres:16-alpine 2>&1)
-                POSTGRES_URL=$(echo "$COPY_OUTPUT" | grep -oE 'registry\.lazycat\.cloud/[a-zA-Z0-9_/.:-]+' | head -1 || echo "")
-              fi
-              echo "postgres_url=$POSTGRES_URL" >> $GITHUB_OUTPUT
-              
-              echo "Processing Redis..."
-              REDIS_EXISTING=$(lzc-cli appstore my-images 2>&1 | grep "redis:7-alpine" | grep -oE 'registry\.lazycat\.cloud/[a-zA-Z0-9_/.:-]+redis[a-zA-Z0-9_/.:-]+' | head -1 || echo "")
-              if [ -n "$REDIS_EXISTING" ]; then
-                REDIS_URL="$REDIS_EXISTING"
-              else
-                COPY_OUTPUT=$(lzc-cli appstore copy-image redis:7-alpine 2>&1)
-                REDIS_URL=$(echo "$COPY_OUTPUT" | grep -oE 'registry\.lazycat\.cloud/[a-zA-Z0-9_/.:-]+' | head -1 || echo "")
-              fi
-              echo "redis_url=$REDIS_URL" >> $GITHUB_OUTPUT
-              ;;
-            CodeEagle/airflow)
-              echo "Processing PostgreSQL..."
-              POSTGRES_EXISTING=$(lzc-cli appstore my-images 2>&1 | grep "postgres:16-alpine" | grep -oE 'registry\.lazycat\.cloud/[a-zA-Z0-9_/.:-]+postgres[a-zA-Z0-9_/.:-]+' | head -1 || echo "")
-              if [ -n "$POSTGRES_EXISTING" ]; then
-                POSTGRES_URL="$POSTGRES_EXISTING"
-              else
-                COPY_OUTPUT=$(lzc-cli appstore copy-image postgres:16-alpine 2>&1)
-                POSTGRES_URL=$(echo "$COPY_OUTPUT" | grep -oE 'registry\.lazycat\.cloud/[a-zA-Z0-9_/.:-]+' | head -1 || echo "")
-              fi
-              echo "postgres_url=$POSTGRES_URL" >> $GITHUB_OUTPUT
-              
-              echo "Processing Redis..."
-              REDIS_EXISTING=$(lzc-cli appstore my-images 2>&1 | grep "redis:7-alpine" | grep -oE 'registry\.lazycat\.cloud/[a-zA-Z0-9_/.:-]+redis[a-zA-Z0-9_/.:-]+' | head -1 || echo "")
-              if [ -n "$REDIS_EXISTING" ]; then
-                REDIS_URL="$REDIS_EXISTING"
-              else
-                COPY_OUTPUT=$(lzc-cli appstore copy-image redis:7-alpine 2>&1)
-                REDIS_URL=$(echo "$COPY_OUTPUT" | grep -oE 'registry\.lazycat\.cloud/[a-zA-Z0-9_/.:-]+' | head -1 || echo "")
-              fi
-              echo "redis_url=$REDIS_URL" >> $GITHUB_OUTPUT
-              ;;
-            CodeEagle/cmms)
-              echo "Processing CMMS backend..."
-              BACKEND_EXISTING=$(lzc-cli appstore my-images 2>&1 | grep "atlas-cmms-backend:latest" | grep -oE 'registry\.lazycat\.cloud/[a-zA-Z0-9_/.:-]+' | head -1 || echo "")
-              if [ -n "$BACKEND_EXISTING" ]; then
-                BACKEND_URL="$BACKEND_EXISTING"
-              else
-                COPY_OUTPUT=$(lzc-cli appstore copy-image intelloop/atlas-cmms-backend:latest 2>&1)
-                BACKEND_URL=$(echo "$COPY_OUTPUT" | grep -oE 'registry\.lazycat\.cloud/[a-zA-Z0-9_/.:-]+' | head -1 || echo "")
-              fi
-              echo "backend_url=$BACKEND_URL" >> $GITHUB_OUTPUT
+          python3 scripts/collect_targets.py
 
-              echo "Processing PostgreSQL..."
-              POSTGRES_EXISTING=$(lzc-cli appstore my-images 2>&1 | grep "postgres:16-alpine" | grep -oE 'registry\.lazycat\.cloud/[a-zA-Z0-9_/.:-]+postgres[a-zA-Z0-9_/.:-]+' | head -1 || echo "")
-              if [ -n "$POSTGRES_EXISTING" ]; then
-                POSTGRES_URL="$POSTGRES_EXISTING"
-              else
-                COPY_OUTPUT=$(lzc-cli appstore copy-image postgres:16-alpine 2>&1)
-                POSTGRES_URL=$(echo "$COPY_OUTPUT" | grep -oE 'registry\.lazycat\.cloud/[a-zA-Z0-9_/.:-]+' | head -1 || echo "")
-              fi
-              echo "postgres_url=$POSTGRES_URL" >> $GITHUB_OUTPUT
-
-              echo "Processing MinIO..."
-              MINIO_EXISTING=$(lzc-cli appstore my-images 2>&1 | grep "minio/minio:RELEASE.2025-04-22T22-12-26Z" | grep -oE 'registry\.lazycat\.cloud/[a-zA-Z0-9_/.:-]+' | head -1 || echo "")
-              if [ -n "$MINIO_EXISTING" ]; then
-                MINIO_URL="$MINIO_EXISTING"
-              else
-                COPY_OUTPUT=$(lzc-cli appstore copy-image minio/minio:RELEASE.2025-04-22T22-12-26Z 2>&1)
-                MINIO_URL=$(echo "$COPY_OUTPUT" | grep -oE 'registry\.lazycat\.cloud/[a-zA-Z0-9_/.:-]+' | head -1 || echo "")
-              fi
-              echo "minio_url=$MINIO_URL" >> $GITHUB_OUTPUT
-              ;;
-          esac
-
-      - name: Copy image to LazyCat registry
-        if: steps.check-update.outputs.update_needed == 'true'
-        id: copy-image
-        env:
-          LZC_CLI_TOKEN: ${{ secrets.LZC_CLI_TOKEN }}
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
-          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
-          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
-        run: |
-          TARGET_REPO="${{ inputs.target_repo }}"
-          HEAD_SHA="${{ steps.wait-target-workflow.outputs.head_sha }}"
-          FORCE_BUILD="${{ inputs.force_build }}"
-          TARGET_VERSION="${{ inputs.target_version }}"
-
-          # Read current manifest image as a safe fallback when GHCR copy is unauthorized
-          CURRENT_MANIFEST_IMAGE=$(gh api "repos/$TARGET_REPO/contents/lzc-manifest.yml" --jq '.content' 2>/dev/null | base64 -d | grep 'image:' | head -1 | awk '{print $2}' || echo "")
-          ALLOW_STALE_FALLBACK="true"
-          if [ "$FORCE_BUILD" = "true" ] || [ -n "$TARGET_VERSION" ]; then
-            ALLOW_STALE_FALLBACK="false"
-          fi
-          
-          # 构造 ghcr.io 镜像地址
-          OWNER=$(echo "$TARGET_REPO" | cut -d'/' -f1 | tr '[:upper:]' '[:lower:]')
-          REPO=$(echo "$TARGET_REPO" | cut -d'/' -f2 | tr '[:upper:]' '[:lower:]')
-          if [ -z "$HEAD_SHA" ]; then
-            echo "Missing target workflow head SHA; cannot resolve self-built image tag"
-            exit 1
-          fi
-
-          FIRST_TAG=$(echo "$HEAD_SHA" | cut -c1-12)
-          TAG_CANDIDATES=("$FIRST_TAG")
-          GHCR_IMAGE="ghcr.io/${OWNER}/${REPO}:${FIRST_TAG}"
-          echo "Copying self-built image for ${TARGET_REPO} using commit tag: ${FIRST_TAG}"
-
-          EXISTING_ACCELERATED_URL=$(lzc-cli appstore my-images 2>&1 | grep "/${REPO}:${FIRST_TAG}" | grep -oE 'registry\.lazycat\.cloud/[a-zA-Z0-9_/.:-]+' | head -1 || echo "")
-          CAN_REUSE_EXISTING="true"
-          if [ "$FORCE_BUILD" = "true" ] || [ -n "$TARGET_VERSION" ]; then
-            CAN_REUSE_EXISTING="false"
-          fi
-
-          if [ "$CAN_REUSE_EXISTING" = "true" ] && [ -n "$EXISTING_ACCELERATED_URL" ]; then
-            ACCELERATED_URL="$EXISTING_ACCELERATED_URL"
-            echo "Reusing existing image: $ACCELERATED_URL"
-          else
-            if [ -n "$EXISTING_ACCELERATED_URL" ]; then
-              echo "Skipping image reuse because force rebuild or explicit target version was requested"
-            fi
-            if [ -z "${GHCR_TOKEN:-}" ]; then
-              GHCR_TOKEN="${GH_TOKEN:-}"
-            fi
-            if [ -z "${GHCR_USERNAME:-}" ]; then
-              GHCR_USERNAME="$(echo "$TARGET_REPO" | cut -d'/' -f1)"
-            fi
-            if [ -z "${GHCR_TOKEN:-}" ]; then
-              echo "GHCR_TOKEN is empty. Set repo secret GHCR_TOKEN (PAT with read:packages) to enable private GHCR pulls."
-            else
-            echo "$GHCR_TOKEN" | docker login ghcr.io -u "$GHCR_USERNAME" --password-stdin
-            fi
-            ACCELERATED_URL=""
-            COPY_STATUS=1
-            for TAG in "${TAG_CANDIDATES[@]}"; do
-              GHCR_IMAGE="ghcr.io/${OWNER}/${REPO}:${TAG}"
-              echo "Trying image: $GHCR_IMAGE"
-              if ! docker pull "$GHCR_IMAGE"; then
-                echo "Pull failed for $GHCR_IMAGE, trying direct copy via lzc-cli"
-              fi
-
-              set +e
-              COPY_OUTPUT=$(timeout 1800 lzc-cli appstore copy-image "$GHCR_IMAGE" 2>&1)
-              COPY_STATUS=$?
-              set -e
-
-              echo "$COPY_OUTPUT"
-
-              if [ "$COPY_STATUS" -eq 124 ]; then
-                echo "Timed out while copying image after 1800 seconds: $GHCR_IMAGE"
-                exit 1
-              fi
-
-              if [ "$COPY_STATUS" -eq 0 ]; then
-                ACCELERATED_URL=$(echo "$COPY_OUTPUT" | grep -oE 'registry\.lazycat\.cloud/[a-zA-Z0-9_/.:-]+' | head -1 || echo "")
-                if [ -n "$ACCELERATED_URL" ]; then
-                  break
-                fi
-              fi
-            done
-            
-            if [ -z "$ACCELERATED_URL" ] && [ "$COPY_STATUS" -ne 0 ]; then
-              echo "Failed to copy any candidate image for $TARGET_REPO"
-              exit "$COPY_STATUS"
-            fi
-          fi
-          
-          if [ -z "$ACCELERATED_URL" ]; then
-            if [ "$ALLOW_STALE_FALLBACK" = "true" ] && [[ "$CURRENT_MANIFEST_IMAGE" == registry.lazycat.cloud/* ]]; then
-              ACCELERATED_URL="$CURRENT_MANIFEST_IMAGE"
-              echo "Falling back to current manifest image: $ACCELERATED_URL"
-            else
-              echo "Failed to get accelerated URL (force build requires fresh image copy)"
-              exit 1
-            fi
-          fi
-          
-          echo "accelerated_url=$ACCELERATED_URL" >> $GITHUB_OUTPUT
-          echo "Image copied to: $ACCELERATED_URL"
-
-      - name: Checkout target repository
-        if: steps.check-update.outputs.update_needed == 'true'
-        uses: actions/checkout@v4
-        with:
-          repository: ${{ inputs.target_repo }}
-          token: ${{ secrets.GH_TOKEN }}
-          ref: ${{ steps.wait-target-workflow.outputs.head_sha }}
-          fetch-depth: 1
-
-      - name: Show checked out target revision
-        if: steps.check-update.outputs.update_needed == 'true'
-        run: |
-          echo "Checked out commit: $(git rev-parse HEAD)"
-          echo "Expected head_sha: ${{ steps.wait-target-workflow.outputs.head_sha }}"
-          echo "Working tree icon:"
-          ls -lh icon.png
-          file icon.png
-          shasum -a 256 icon.png
-          sed -n '1,40p' lzc-manifest.yml
-
-      - name: Update manifest
-        if: steps.check-update.outputs.update_needed == 'true'
-        env:
-          ACCELERATED_URL: ${{ steps.copy-image.outputs.accelerated_url }}
-          BUILD_VERSION: ${{ steps.get-version.outputs.build_version }}
-          SOURCE_VERSION: ${{ steps.get-version.outputs.source_version }}
-          BACKEND_URL: ${{ steps.deps-images.outputs.backend_url }}
-          POSTGRES_URL: ${{ steps.deps-images.outputs.postgres_url }}
-          REDIS_URL: ${{ steps.deps-images.outputs.redis_url }}
-          MINIO_URL: ${{ steps.deps-images.outputs.minio_url }}
-        run: |
-          # 更新主镜像和版本
-          python3 - <<'PY'
-          from pathlib import Path
-          import os
-          import re
-
-          manifest_path = Path("lzc-manifest.yml")
-          content = manifest_path.read_text()
-
-          accelerated_url = os.environ["ACCELERATED_URL"]
-          target_image_repo = accelerated_url.rsplit(":", 1)[0]
-
-          def update_service_image(text: str, name: str, image: str) -> tuple[str, int]:
-              pattern = re.compile(
-                  rf'(^\s{{2}}{re.escape(name)}:\n(?:\s{{4}}.*\n)*?\s{{4}}image:\s*)([^\n]+)',
-                  re.MULTILINE,
-              )
-              return pattern.subn(r"\1" + image, text, count=1)
-
-          services_match = re.search(r'(^services:\n(?:.*\n)*)', content, re.MULTILINE)
-          if not services_match:
-              raise SystemExit("Failed to detect services block in lzc-manifest.yml")
-
-          service_names = re.findall(r'^\s{2}([A-Za-z0-9_.-]+):\s*$', content, re.MULTILINE)
-          updated_any = False
-          for service_name in service_names:
-              image_match = re.search(
-                  rf'^\s{{2}}{re.escape(service_name)}:\n(?:\s{{4}}.*\n)*?\s{{4}}image:\s*([^\n]+)',
-                  content,
-                  re.MULTILINE,
-              )
-              if not image_match:
-                  continue
-              current_image = image_match.group(1).strip()
-              current_repo = current_image.rsplit(":", 1)[0]
-              if current_repo == target_image_repo:
-                  content, count = update_service_image(content, service_name, accelerated_url)
-                  if count == 1:
-                      updated_any = True
-
-          if not updated_any:
-              backend_match = re.search(r'backend:\s*https?://([A-Za-z0-9_.-]+):\d+/?', content)
-              if not backend_match:
-                  raise SystemExit("Failed to detect primary backend service from application.upstreams")
-              service_name = backend_match.group(1)
-              content, count = update_service_image(content, service_name, accelerated_url)
-              if count != 1:
-                  raise SystemExit(f"Failed to update services.{service_name}.image in lzc-manifest.yml")
-
-          backend_url = os.environ.get("BACKEND_URL", "").strip()
-          if backend_url:
-              content, count = update_service_image(content, "api", backend_url)
-              if count != 1:
-                  raise SystemExit("Failed to update services.api.image in lzc-manifest.yml")
-
-          postgres_url = os.environ.get("POSTGRES_URL", "").strip()
-          if postgres_url:
-              content, count = update_service_image(content, "postgres", postgres_url)
-              if count != 1:
-                  raise SystemExit("Failed to update services.postgres.image in lzc-manifest.yml")
-
-          redis_url = os.environ.get("REDIS_URL", "").strip()
-          if redis_url:
-              content, count = update_service_image(content, "redis", redis_url)
-              if count != 1:
-                  raise SystemExit("Failed to update services.redis.image in lzc-manifest.yml")
-
-          minio_url = os.environ.get("MINIO_URL", "").strip()
-          if minio_url:
-              content, count = update_service_image(content, "minio", minio_url)
-              if count != 1:
-                  raise SystemExit("Failed to update services.minio.image in lzc-manifest.yml")
-
-          manifest_path.write_text(content)
-          PY
-          sed -i "s|^version:.*|version: $BUILD_VERSION|g" lzc-manifest.yml
-          
-          echo "Updated to version: $BUILD_VERSION"
-          echo "Updated image: $ACCELERATED_URL"
-
-          cat > .lazycat-build.json <<EOF
-          {
-            "source_version": "$SOURCE_VERSION",
-            "build_version": "$BUILD_VERSION",
-            "build_label": "${{ steps.get-version.outputs.build_label }}"
-          }
-          EOF
-
-      - name: Build package
-        if: steps.check-update.outputs.update_needed == 'true'
-        env:
-          LZC_CLI_TOKEN: ${{ secrets.LZC_CLI_TOKEN }}
-        run: |
-          PROJECT_NAME_LOWER=$(basename ${{ inputs.target_repo }})
-          lzc-cli project build -o ${PROJECT_NAME_LOWER}.lpk
-
-      - name: Verify packaged manifest
-        if: steps.check-update.outputs.update_needed == 'true'
-        run: |
-          PROJECT_NAME_LOWER=$(basename ${{ inputs.target_repo }})
-          TMP_DIR=$(mktemp -d)
-          unzip -q "${PROJECT_NAME_LOWER}.lpk" -d "$TMP_DIR"
-          echo "Packaged manifest upstreams:"
-          sed -n '/^application:/,/^services:/p' "$TMP_DIR/manifest.yml"
-          echo "Packaged icon:"
-          ls -lh "$TMP_DIR/icon.png"
-          file "$TMP_DIR/icon.png"
-          shasum -a 256 "$TMP_DIR/icon.png"
-
-      - name: Publish to LazyCat App Store
-        if: steps.check-update.outputs.update_needed == 'true' && inputs.publish_to_store == true
-        env:
-          LZC_CLI_TOKEN: ${{ secrets.LZC_CLI_TOKEN }}
-        run: |
-          BUILD_VERSION="${{ steps.get-version.outputs.build_version }}"
-          PROJECT_NAME_LOWER=$(basename ${{ inputs.target_repo }})
-          lzc-cli appstore publish ${PROJECT_NAME_LOWER}.lpk --clang en -c "Auto-built version $BUILD_VERSION"
-
-      - name: Create GitHub Release
-        if: steps.check-update.outputs.update_needed == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GH_TOKEN }}
-        run: |
-          BUILD_VERSION="${{ steps.get-version.outputs.build_version }}"
-          SOURCE_VERSION="${{ steps.get-version.outputs.source_version }}"
-          BUILD_LABEL="${{ steps.get-version.outputs.build_label }}"
-          PROJECT_NAME_LOWER=$(basename ${{ inputs.target_repo }})
-          
-          gh release delete "v$BUILD_VERSION" --repo ${{ inputs.target_repo }} --yes 2>/dev/null || true
-          gh release create "v$BUILD_VERSION" \
-            --repo ${{ inputs.target_repo }} \
-            --title "v$BUILD_VERSION" \
-            --notes "Auto-built version $BUILD_VERSION (source: $SOURCE_VERSION, label: $BUILD_LABEL)" \
-            ${PROJECT_NAME_LOWER}.lpk
-
-      - name: Commit and push changes
-        if: steps.check-update.outputs.update_needed == 'true'
-        run: |
-          BUILD_VERSION="${{ steps.get-version.outputs.build_version }}"
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add lzc-manifest.yml .lazycat-build.json
-          if git diff --cached --quiet; then
-            echo "No changes to commit"
-            exit 0
-          fi
-          git commit -m "Update to version $BUILD_VERSION"
-          git push origin HEAD:main
+  build:
+    needs: prepare
+    if: needs.prepare.outputs.has_targets == 'true'
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        include: ${{ fromJson(needs.prepare.outputs.matrix) }}
+    concurrency:
+      group: build-${{ matrix.target_repo }}
+      cancel-in-progress: false
+    uses: ./.github/workflows/update-image.yml
+    with:
+      config_repo: ${{ needs.prepare.outputs.config_repo }}
+      config_ref: ${{ needs.prepare.outputs.config_ref }}
+      artifact_repo: ${{ needs.prepare.outputs.artifact_repo }}
+      config_file: ${{ matrix.config_file }}
+      target_version: ${{ matrix.target_version }}
+      force_build: ${{ matrix.force_build }}
+      publish_to_store: ${{ matrix.publish_to_store }}
+      check_only: ${{ matrix.check_only }}
+    secrets: inherit

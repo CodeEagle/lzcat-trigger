@@ -1,363 +1,90 @@
-name: Update {{PROJECT_NAME}} Image
+name: Update Image
 
 on:
-  # 手动触发
-  workflow_dispatch:
+  workflow_call:
     inputs:
-      force_build:
-        description: 'Force build even if no new version'
-        required: false
-        default: false
-        type: boolean
-      target_version:
-        description: 'Target version to build (e.g., 0.3.3). Leave empty for latest.'
-        required: false
-        default: ''
+      config_repo:
+        required: true
         type: string
-      publish_to_store:
-        description: 'Publish to LazyCat App Store'
+      config_ref:
+        required: true
+        type: string
+      config_file:
+        required: true
+        type: string
+      artifact_repo:
+        required: true
+        type: string
+      target_version:
         required: false
-        default: false
+        type: string
+        default: ""
+      force_build:
+        required: false
         type: boolean
-  # 定时检查，每6小时一次
-  schedule:
-    - cron: '0 */6 * * *'
-
-# ==================== 配置区域 ====================
-# 以下变量需要根据项目实际情况修改
-env:
-  # 上游仓库信息
-  UPSTREAM_REPO: {{UPSTREAM_REPO}}              # 例如: RightNow-AI/openfang
-  PROJECT_NAME: {{PROJECT_NAME}}                # 例如: OpenFang
-  PROJECT_NAME_LOWER: {{PROJECT_NAME_LOWER}}    # 例如: openfang
-  
-  # 镜像配置
-  # 官方镜像地址（如 ghcr.io/xxx/app），留空表示无官方镜像
-  OFFICIAL_IMAGE_REGISTRY: {{OFFICIAL_IMAGE_REGISTRY}}  # 例如: ghcr.io/rightnow-ai/openfang 或留空
-  
-  # 预编译二进制配置（当无官方镜像时使用）
-  # 二进制下载 URL 模板，支持 $LATEST_VERSION 变量
-  PRECOMPILED_BINARY_URL: {{PRECOMPILED_BINARY_URL}}
-  # 示例: https://github.com/RightNow-AI/openfang/releases/download/v$LATEST_VERSION/openfang-x86_64-unknown-linux-gnu.tar.gz
-  
-  # Dockerfile 类型: simple(简单HTTP服务), custom(自定义，需提供 Dockerfile.template)
-  DOCKERFILE_TYPE: {{DOCKERFILE_TYPE}}          # 例如: simple
-  # 服务端口
-  SERVICE_PORT: {{SERVICE_PORT}}                # 例如: 4200
-  # 服务启动命令
-  SERVICE_CMD: {{SERVICE_CMD}}                  # 例如: ["openfang", "start"]
-# ==================== 配置区域结束 ====================
+        default: false
+      publish_to_store:
+        required: false
+        type: boolean
+        default: false
+      check_only:
+        required: false
+        type: boolean
+        default: false
 
 jobs:
-  check-and-update:
+  update-image:
     runs-on: ubuntu-latest
     permissions:
-      contents: write
+      contents: read
       packages: write
     steps:
-      - name: Checkout repository
+      - name: Checkout trigger repository
         uses: actions/checkout@v4
 
-      - name: Get latest package version
-        id: get-version
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          TARGET_VERSION="${{ inputs.target_version }}"
-          LATEST_VERSION=""
-          RELEASE_NOTES=""
-
-          if [ -n "$TARGET_VERSION" ]; then
-            # 使用指定版本
-            LATEST_VERSION="$TARGET_VERSION"
-            echo "Using specified version: $LATEST_VERSION"
-          else
-            # 1. 尝试获取最新 release
-            echo "Checking for latest release..."
-            RELEASE_RESPONSE=$(gh api "repos/${{ env.UPSTREAM_REPO }}/releases/latest" 2>&1 || true)
-            if echo "$RELEASE_RESPONSE" | jq -e '.tag_name' >/dev/null 2>&1; then
-              RELEASE_TAG=$(echo "$RELEASE_RESPONSE" | jq -r '.tag_name')
-              LATEST_VERSION="${RELEASE_TAG#v}"
-              RELEASE_NOTES=$(echo "$RELEASE_RESPONSE" | jq -r '.body // empty')
-              echo "Found release version: $LATEST_VERSION"
-            fi
-
-            # 2. 尝试获取最新 tag
-            if [ -z "$LATEST_VERSION" ]; then
-              echo "Checking for latest tag..."
-              TAGS_RESPONSE=$(gh api "repos/${{ env.UPSTREAM_REPO }}/tags?per_page=1" 2>&1 || true)
-              if echo "$TAGS_RESPONSE" | jq -e '.[0].name' >/dev/null 2>&1; then
-                LATEST_TAG=$(echo "$TAGS_RESPONSE" | jq -r '.[0].name')
-                LATEST_VERSION="${LATEST_TAG#v}"
-                RELEASE_NOTES="Build from tag $LATEST_TAG"
-                echo "Found tag version: $LATEST_VERSION"
-              fi
-            fi
-
-            # 3. 尝试从 CHANGELOG 解析版本
-            if [ -z "$LATEST_VERSION" ]; then
-              echo "Checking CHANGELOG..."
-              for changelog_file in "CHANGELOG.md" "CHANGELOG" "changelog.md" "HISTORY.md"; do
-                CHANGELOG_RESPONSE=$(gh api "repos/${{ env.UPSTREAM_REPO }}/contents/$changelog_file" 2>&1 || true)
-                if echo "$CHANGELOG_RESPONSE" | jq -e '.content' >/dev/null 2>&1; then
-                  echo "Found $changelog_file, parsing version..."
-                  CHANGELOG_CONTENT=$(echo "$CHANGELOG_RESPONSE" | jq -r '.content' | base64 -d 2>/dev/null || true)
-                  if [ -n "$CHANGELOG_CONTENT" ]; then
-                    # 匹配: ## [v0.2], ## [v0.2.0], ## v0.2, ## 0.2.0
-                    CHANGELOG_VERSION=$(echo "$CHANGELOG_CONTENT" | grep -m1 -E '^##\s+\[?v?[0-9]+\.[0-9]+' | sed -E 's/^##\s+\[?v?([0-9]+\.[0-9]+(\.[0-9]+)?).*/\1/' | head -1 || true)
-                    if [ -n "$CHANGELOG_VERSION" ]; then
-                      if [[ ! "$CHANGELOG_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
-                        CHANGELOG_VERSION="${CHANGELOG_VERSION}.0"
-                      fi
-                      LATEST_VERSION="$CHANGELOG_VERSION"
-                      RELEASE_NOTES="Build version $LATEST_VERSION from CHANGELOG"
-                      echo "Parsed version: $LATEST_VERSION"
-                      break
-                    fi
-                  fi
-                fi
-              done
-            fi
-
-            # 4. 兜底版本
-            if [ -z "$LATEST_VERSION" ]; then
-              LATEST_VERSION="0.0.1"
-              RELEASE_NOTES="Auto build from main branch"
-              echo "Using fallback version: $LATEST_VERSION"
-            fi
-          fi
-
-          echo "Final version: $LATEST_VERSION"
-          echo "latest_version=$LATEST_VERSION" >> $GITHUB_OUTPUT
-          echo "${RELEASE_NOTES:-Build version $LATEST_VERSION}" > /tmp/release_notes.txt
-          echo "release_notes_file=/tmp/release_notes.txt" >> $GITHUB_OUTPUT
-
-      - name: Check if update needed
-        id: check-update
-        run: |
-          CURRENT_VERSION=$(grep '^version:' lzc-manifest.yml | head -1 | awk '{print $2}')
-          LATEST_VERSION="${{ steps.get-version.outputs.latest_version }}"
-          FORCE_BUILD="${{ inputs.force_build }}"
-          TARGET_VERSION="${{ inputs.target_version }}"
-
-          echo "Current version: $CURRENT_VERSION"
-          echo "Latest version: $LATEST_VERSION"
-
-          if [ -n "$TARGET_VERSION" ]; then
-            # 指定版本时总是构建
-            echo "update_needed=true" >> $GITHUB_OUTPUT
-            echo "Target version specified: $TARGET_VERSION"
-          elif [ "$FORCE_BUILD" = "true" ]; then
-            echo "update_needed=true" >> $GITHUB_OUTPUT
-            echo "Force build requested"
-          elif [ -n "$LATEST_VERSION" ] && [ "$CURRENT_VERSION" != "$LATEST_VERSION" ]; then
-            echo "update_needed=true" >> $GITHUB_OUTPUT
-            echo "New version available: $LATEST_VERSION"
-          else
-            echo "update_needed=false" >> $GITHUB_OUTPUT
-            echo "Already on latest version"
-          fi
-
-      - name: Setup Node.js
-        if: steps.check-update.outputs.update_needed == 'true'
-        uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-
-      - name: Install lzc-cli
-        if: steps.check-update.outputs.update_needed == 'true'
-        run: npm install -g @lazycatcloud/lzc-cli
-
-      - name: Build and push image
-        if: steps.check-update.outputs.update_needed == 'true'
-        id: build-image
-        env:
-          LZC_CLI_TOKEN: ${{ secrets.LZC_CLI_TOKEN }}
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          LATEST_VERSION="${{ steps.get-version.outputs.latest_version }}"
-          IMAGE_TAG="${GITHUB_SHA::12}"
-
-          if [ -z "$IMAGE_TAG" ]; then
-            echo "Failed to derive image tag from GITHUB_SHA"
-            exit 1
-          fi
-          
-          # 检查是否配置了官方镜像
-          if [ -n "${{ env.OFFICIAL_IMAGE_REGISTRY }}" ]; then
-            SOURCE_IMAGE="${{ env.OFFICIAL_IMAGE_REGISTRY }}:$LATEST_VERSION"
-            echo "Checking official image: $SOURCE_IMAGE"
-            
-            if docker manifest inspect "$SOURCE_IMAGE" 2>/dev/null; then
-              if [ "${{ inputs.force_build }}" != "true" ]; then
-                SOURCE_REPO=$(echo "$SOURCE_IMAGE" | awk -F'/' '{print $NF}' | awk -F':' '{print $1}')
-                EXISTING_IMAGE=$(lzc-cli appstore my-images 2>&1 | grep "${SOURCE_REPO}:${LATEST_VERSION}" | grep -oE 'registry\.lazycat\.cloud/[a-zA-Z0-9_/.:-]+' | head -1 || echo "")
-                if [ -n "$EXISTING_IMAGE" ]; then
-                  echo "Found existing official image cache: $EXISTING_IMAGE"
-                  echo "accelerated_url=$EXISTING_IMAGE" >> $GITHUB_OUTPUT
-                  exit 0
-                fi
-              else
-                echo "Force build enabled, skipping official image cache check"
-              fi
-
-              echo "Official image found, copying..."
-              COPY_OUTPUT=$(lzc-cli appstore copy-image "$SOURCE_IMAGE" 2>&1)
-              echo "$COPY_OUTPUT"
-              ACCELERATED_URL=$(echo "$COPY_OUTPUT" | grep -oE 'registry\.lazycat\.cloud/[a-zA-Z0-9_/.:-]+' | head -1 || echo "")
-              
-              if [ -n "$ACCELERATED_URL" ]; then
-                echo "accelerated_url=$ACCELERATED_URL" >> $GITHUB_OUTPUT
-                exit 0
-              fi
-            fi
-          fi
-          
-          # 无官方镜像或官方镜像不存在，尝试从预编译二进制构建
-          if [ -n "${{ env.PRECOMPILED_BINARY_URL }}" ]; then
-            echo "Building from precompiled binary..."
-
-            # 检查是否已有构建好的镜像 (force_build 时跳过检查，强制重新构建)
-            if [ "${{ inputs.force_build }}" != "true" ]; then
-              EXISTING_IMAGE=$(lzc-cli appstore my-images 2>&1 | grep "${{ env.PROJECT_NAME_LOWER }}:$IMAGE_TAG" | grep -oE 'registry\.lazycat\.cloud/[a-zA-Z0-9_/.:-]+' | head -1 || echo "")
-
-              if [ -n "$EXISTING_IMAGE" ]; then
-                echo "Found existing image: $EXISTING_IMAGE"
-                echo "accelerated_url=$EXISTING_IMAGE" >> $GITHUB_OUTPUT
-                exit 0
-              fi
-            else
-              echo "Force build enabled, skipping existing image check"
-            fi
-            
-            # 下载预编译二进制
-            BINARY_URL="${{ env.PRECOMPILED_BINARY_URL }}"
-            BINARY_URL="${BINARY_URL//\$LATEST_VERSION/$LATEST_VERSION}"
-            echo "Downloading binary from: $BINARY_URL"
-            
-            mkdir -p /tmp/build
-            cd /tmp/build
-            
-            if [[ "$BINARY_URL" == *.tar.gz ]] || [[ "$BINARY_URL" == *.tgz ]]; then
-              curl -sL "$BINARY_URL" | tar xz
-            elif [[ "$BINARY_URL" == *.zip ]]; then
-              curl -sL "$BINARY_URL" -o binary.zip
-              unzip binary.zip
-            else
-              curl -sL "$BINARY_URL" -o ${{ env.PROJECT_NAME_LOWER }}
-            fi
-            
-            # 创建 Dockerfile
-            case "${{ env.DOCKERFILE_TYPE }}" in
-              "simple")
-                echo 'FROM debian:bookworm-slim' > Dockerfile
-                echo 'RUN apt-get update && apt-get install -y --no-install-recommends ca-certificates && rm -rf /var/lib/apt/lists/*' >> Dockerfile
-                echo 'COPY ${{ env.PROJECT_NAME_LOWER }} /usr/local/bin/${{ env.PROJECT_NAME_LOWER }}' >> Dockerfile
-                echo 'RUN chmod +x /usr/local/bin/${{ env.PROJECT_NAME_LOWER }}' >> Dockerfile
-                echo 'EXPOSE ${{ env.SERVICE_PORT }}' >> Dockerfile
-                echo 'CMD ${{ env.SERVICE_CMD }}' >> Dockerfile
-                ;;
-              *)
-                # 自定义 Dockerfile 应在项目根目录提供
-                if [ -f "${{ github.workspace }}/Dockerfile.template" ]; then
-                  cp ${{ github.workspace }}/Dockerfile.template .
-                  sed -i "s/{{PROJECT_NAME_LOWER}}/${{ env.PROJECT_NAME_LOWER }}/g" Dockerfile
-                  sed -i "s/{{SERVICE_PORT}}/${{ env.SERVICE_PORT }}/g" Dockerfile
-                else
-                  echo "Error: DOCKERFILE_TYPE=custom but no Dockerfile.template found"
-                  exit 1
-                fi
-                ;;
-            esac
-            
-            # 构建并推送镜像
-            LOCAL_IMAGE="ghcr.io/${{ github.repository_owner }}/${{ env.PROJECT_NAME_LOWER }}:$IMAGE_TAG"
-            LOCAL_IMAGE=$(echo "$LOCAL_IMAGE" | tr '[:upper:]' '[:lower:]')
-            echo "Building self-hosted image with commit tag: $LOCAL_IMAGE"
-            docker build -t "$LOCAL_IMAGE" .
-            
-            echo "$GITHUB_TOKEN" | docker login ghcr.io -u ${{ github.repository_owner }} --password-stdin
-            docker push "$LOCAL_IMAGE"
-            
-            # 复制到懒猫镜像源
-            COPY_OUTPUT=$(lzc-cli appstore copy-image "$LOCAL_IMAGE" 2>&1)
-            echo "$COPY_OUTPUT"
-            ACCELERATED_URL=$(echo "$COPY_OUTPUT" | grep -oE 'registry\.lazycat\.cloud/[a-zA-Z0-9_/.:-]+' | head -1 || echo "")
-            
-            if [ -z "$ACCELERATED_URL" ]; then
-              echo "Failed to get accelerated URL"
-              exit 1
-            fi
-            
-            echo "accelerated_url=$ACCELERATED_URL" >> $GITHUB_OUTPUT
-          else
-            echo "No official image configured and no precompiled binary URL set"
-            exit 1
-          fi
-
-      - name: Update manifest
-        if: steps.check-update.outputs.update_needed == 'true'
-        run: |
-          ACCELERATED_URL="${{ steps.build-image.outputs.accelerated_url }}"
-          LATEST_VERSION="${{ steps.get-version.outputs.latest_version }}"
-          
-          sed -i "s|image:.*|image: $ACCELERATED_URL|g" lzc-manifest.yml
-          sed -i "s/^version:.*/version: $LATEST_VERSION/g" lzc-manifest.yml
-          
-          echo "Updated to version: $LATEST_VERSION"
-          echo "Updated image: $ACCELERATED_URL"
-
-      - name: Build package
-        if: steps.check-update.outputs.update_needed == 'true'
-        env:
-          LZC_CLI_TOKEN: ${{ secrets.LZC_CLI_TOKEN }}
-        run: |
-          lzc-cli project build -o ${{ env.PROJECT_NAME_LOWER }}.lpk
-
-      - name: Publish to LazyCat App Store
-        if: steps.check-update.outputs.update_needed == 'true' && inputs.publish_to_store == true
-        env:
-          LZC_CLI_TOKEN: ${{ secrets.LZC_CLI_TOKEN }}
-        run: |
-          LATEST_VERSION="${{ steps.get-version.outputs.latest_version }}"
-          RELEASE_NOTES=$(cat /tmp/release_notes.txt)
-
-          # 使用官方 release notes 发布
-          lzc-cli appstore publish ${{ env.PROJECT_NAME_LOWER }}.lpk --clang en -c "$RELEASE_NOTES"
-
-      - name: Create GitHub Release
-        if: steps.check-update.outputs.update_needed == 'true'
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          LATEST_VERSION="${{ steps.get-version.outputs.latest_version }}"
-
-          # 如果 release 已存在则先删除
-          gh release delete "v$LATEST_VERSION" --yes 2>/dev/null || true
-
-          gh release create "v$LATEST_VERSION" \
-            --title "v$LATEST_VERSION" \
-            --notes-file /tmp/release_notes.txt \
-            ${{ env.PROJECT_NAME_LOWER }}.lpk
-
-      - name: Commit and push changes
-        if: steps.check-update.outputs.update_needed == 'true'
+      - name: Checkout config repository
         env:
           GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          CONFIG_REPO: ${{ inputs.config_repo }}
+          CONFIG_REF: ${{ inputs.config_ref }}
         run: |
-          LATEST_VERSION="${{ steps.get-version.outputs.latest_version }}"
+          git clone --depth=1 --branch "$CONFIG_REF" "https://x-access-token:${GH_TOKEN}@github.com/${CONFIG_REPO}.git" "$RUNNER_TEMP/lzcat-config"
 
-          # 获取当前文件的 SHA
-          FILE_SHA=$(gh api repos/${{ github.repository }}/contents/lzc-manifest.yml --jq '.sha' 2>/dev/null || echo "")
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "20"
 
-          if [ -z "$FILE_SHA" ]; then
-            echo "Failed to get file SHA"
-            exit 1
+      - name: Install lzc-cli
+        run: npm install -g @lazycatcloud/lzc-cli
+
+      - name: Run shared image update flow
+        env:
+          CONFIG_ROOT: ${{ runner.temp }}/lzcat-config
+          GH_TOKEN: ${{ secrets.GH_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GHCR_TOKEN: ${{ secrets.GHCR_TOKEN }}
+          GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
+          LZC_CLI_TOKEN: ${{ secrets.LZC_CLI_TOKEN }}
+          GITHUB_REPOSITORY_OWNER: ${{ github.repository_owner }}
+        run: |
+          args=(
+            --config-root "$CONFIG_ROOT"
+            --config-file "${{ inputs.config_file }}"
+            --artifact-repo "${{ inputs.artifact_repo }}"
+          )
+
+          if [ -n "${{ inputs.target_version }}" ]; then
+            args+=(--target-version "${{ inputs.target_version }}")
+          fi
+          if [ "${{ inputs.force_build }}" = "true" ]; then
+            args+=(--force-build)
+          fi
+          if [ "${{ inputs.publish_to_store }}" = "true" ]; then
+            args+=(--publish-to-store)
+          fi
+          if [ "${{ inputs.check_only }}" = "true" ]; then
+            args+=(--check-only)
           fi
 
-          # 使用 GitHub API 更新文件
-          gh api -X PUT repos/${{ github.repository }}/contents/lzc-manifest.yml \
-            -f message="Update ${{ env.PROJECT_NAME }} to version $LATEST_VERSION" \
-            -f content="$(base64 -w 0 lzc-manifest.yml)" \
-            -f sha="$FILE_SHA" \
-            -f branch="${{ github.ref_name }}"
+          python3 scripts/run_build.py "${args[@]}"
