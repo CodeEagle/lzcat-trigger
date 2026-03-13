@@ -376,6 +376,21 @@ def build_with_dockerfile(
     return target_image
 
 
+def copy_overlay_paths(repo_dir: Path, build_root: Path, overlay_paths: list[str]) -> None:
+    for relative in overlay_paths:
+        source = repo_dir / relative
+        target = build_root / relative
+        if not source.exists():
+            raise RuntimeError(f"Overlay path not found: {source}")
+        if source.is_dir():
+            if target.exists():
+                shutil.rmtree(target)
+            shutil.copytree(source, target)
+        else:
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(source, target)
+
+
 def build_target_image(
     repo_dir: Path,
     config: dict[str, Any],
@@ -392,6 +407,7 @@ def build_target_image(
     docker_login_ghcr(env)
     build_strategy = str(config.get("build_strategy", "")).strip()
     build_args = dict(config.get("build_args", {}))
+    overlay_paths = [str(item).strip() for item in config.get("overlay_paths", []) if str(item).strip()]
     build_args.setdefault("SOURCE_VERSION", source_version)
     build_args.setdefault("BUILD_VERSION", build_version)
 
@@ -485,6 +501,7 @@ def build_target_image(
             content = content.replace("{{PROJECT_NAME_LOWER}}", name_lower)
             content = content.replace("{{SERVICE_PORT}}", str(config.get("service_port", "")))
             (source_root / "Dockerfile").write_text(content)
+            copy_overlay_paths(repo_dir, source_root, overlay_paths)
             return build_with_dockerfile(source_root, target_image, env, "Dockerfile", ".", build_args)
         dockerfile_path = source_root / "Dockerfile"
         if not dockerfile_path.exists():
