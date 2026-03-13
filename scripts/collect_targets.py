@@ -42,19 +42,6 @@ def load_configs(config_root: Path) -> tuple[list[dict], dict[str, dict]]:
     return configs, by_repo
 
 
-def normalize_target_repo(value: str) -> str:
-    target = value.strip()
-    if not target:
-        return ""
-    if "/" in target:
-        return target
-    if "__" in target:
-        owner, name = target.split("__", 1)
-        if owner and name:
-            return f"{owner}/{name}"
-    return target
-
-
 def write_output(name: str, value: str) -> None:
     output_path = os.environ.get("GITHUB_OUTPUT")
     if not output_path:
@@ -71,7 +58,7 @@ def main() -> int:
 
     configs, by_repo = load_configs(config_root)
 
-    target_repo = normalize_target_repo(
+    target_repo = (
         os.environ.get("INPUT_TARGET_REPO")
         or str(payload.get("target_repo", "")).strip()
     )
