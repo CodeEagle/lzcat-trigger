@@ -644,7 +644,8 @@ def main() -> int:
         )
         manifest_path.write_text(updated_manifest)
 
-        build_label = f"{source_version}@{datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ')}"
+        build_stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
+        build_label = f"{source_version}@{build_stamp}"
         meta_path.write_text(
             json.dumps(
                 {
@@ -687,12 +688,12 @@ def main() -> int:
             )
 
         report["phase"] = "publish_artifact"
-        report["artifact_release_tag"] = f"{config['repo'].replace('/', '--')}-v{build_version}"
+        report["artifact_release_tag"] = f"{config['repo'].replace('/', '--')}-v{build_version}-{build_stamp}"
         write_report(report, report_path)
         report["artifact_release_url"] = publish_release_asset(
             args.artifact_repo,
             report["artifact_release_tag"],
-            f"{config['repo']} v{build_version}",
+            f"{config['repo']} v{build_version} ({build_stamp})",
             f"Auto-built version {build_version} (source: {source_version}, label: {build_label})",
             [lpk_path, report_path],
             env,
