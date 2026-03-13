@@ -437,6 +437,7 @@ jobs:
           TARGET_REPO="${{ inputs.target_repo }}"
           SOURCE_VERSION="${{ steps.get-version.outputs.source_version }}"
           BUILD_VERSION="${{ steps.get-version.outputs.build_version }}"
+          HEAD_SHA="${{ steps.wait-target-workflow.outputs.head_sha }}"
           FORCE_BUILD="${{ inputs.force_build }}"
           TARGET_VERSION="${{ inputs.target_version }}"
 
@@ -450,7 +451,12 @@ jobs:
           # 构造 ghcr.io 镜像地址
           OWNER=$(echo "$TARGET_REPO" | cut -d'/' -f1 | tr '[:upper:]' '[:lower:]')
           REPO=$(echo "$TARGET_REPO" | cut -d'/' -f2 | tr '[:upper:]' '[:lower:]')
-          TAG_CANDIDATES=("$SOURCE_VERSION")
+          TAG_CANDIDATES=()
+          if [ -n "$HEAD_SHA" ]; then
+            SHORT_SHA=$(echo "$HEAD_SHA" | cut -c1-12)
+            TAG_CANDIDATES+=("$SHORT_SHA")
+          fi
+          TAG_CANDIDATES+=("$SOURCE_VERSION")
           if [ -n "$BUILD_VERSION" ] && [ "$BUILD_VERSION" != "$SOURCE_VERSION" ]; then
             TAG_CANDIDATES+=("$BUILD_VERSION")
           fi
