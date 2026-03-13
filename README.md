@@ -19,6 +19,7 @@
 1. 触发 lzcat-trigger 仓库的工作流
 2. 使用 GitHub API 调用目标仓库的 workflow_dispatch
 3. 目标仓库的 update-image.yml 会执行完整的构建流程
+4. 对仓库自建镜像，统一使用目标仓库本次 workflow 对应的 commit SHA 作为镜像 tag；版本号只用于 `lzc-manifest.yml` 和 release 元数据，不用于镜像 tag
 
 ## 优势
 

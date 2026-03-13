@@ -135,12 +135,13 @@ jobs:
       - name: Check if update needed
         id: check-update
         run: |
-          CURRENT_IMAGE=$(grep 'image:' lzc-manifest.yml | head -1 | awk '{print $2}')
-          echo "Current image: $CURRENT_IMAGE"
-
+          CURRENT_VERSION=$(grep '^version:' lzc-manifest.yml | head -1 | awk '{print $2}')
           LATEST_VERSION="${{ steps.get-version.outputs.latest_version }}"
           FORCE_BUILD="${{ inputs.force_build }}"
           TARGET_VERSION="${{ inputs.target_version }}"
+
+          echo "Current version: $CURRENT_VERSION"
+          echo "Latest version: $LATEST_VERSION"
 
           if [ -n "$TARGET_VERSION" ]; then
             # 指定版本时总是构建
@@ -149,7 +150,7 @@ jobs:
           elif [ "$FORCE_BUILD" = "true" ]; then
             echo "update_needed=true" >> $GITHUB_OUTPUT
             echo "Force build requested"
-          elif [ -n "$LATEST_VERSION" ] && [[ "$CURRENT_IMAGE" != *"$LATEST_VERSION"* ]]; then
+          elif [ -n "$LATEST_VERSION" ] && [ "$CURRENT_VERSION" != "$LATEST_VERSION" ]; then
             echo "update_needed=true" >> $GITHUB_OUTPUT
             echo "New version available: $LATEST_VERSION"
           else
@@ -175,6 +176,12 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           LATEST_VERSION="${{ steps.get-version.outputs.latest_version }}"
+          IMAGE_TAG="${GITHUB_SHA::12}"
+
+          if [ -z "$IMAGE_TAG" ]; then
+            echo "Failed to derive image tag from GITHUB_SHA"
+            exit 1
+          fi
           
           # 检查是否配置了官方镜像
           if [ -n "${{ env.OFFICIAL_IMAGE_REGISTRY }}" ]; then
@@ -212,7 +219,7 @@ jobs:
 
             # 检查是否已有构建好的镜像 (force_build 时跳过检查，强制重新构建)
             if [ "${{ inputs.force_build }}" != "true" ]; then
-              EXISTING_IMAGE=$(lzc-cli appstore my-images 2>&1 | grep "$LATEST_VERSION" | grep -oE 'registry\.lazycat\.cloud/[a-zA-Z0-9_/.:-]+' | head -1 || echo "")
+              EXISTING_IMAGE=$(lzc-cli appstore my-images 2>&1 | grep "${{ env.PROJECT_NAME_LOWER }}:$IMAGE_TAG" | grep -oE 'registry\.lazycat\.cloud/[a-zA-Z0-9_/.:-]+' | head -1 || echo "")
 
               if [ -n "$EXISTING_IMAGE" ]; then
                 echo "Found existing image: $EXISTING_IMAGE"
@@ -264,8 +271,9 @@ jobs:
             esac
             
             # 构建并推送镜像
-            LOCAL_IMAGE="ghcr.io/${{ github.repository_owner }}/${{ env.PROJECT_NAME_LOWER }}:$LATEST_VERSION"
+            LOCAL_IMAGE="ghcr.io/${{ github.repository_owner }}/${{ env.PROJECT_NAME_LOWER }}:$IMAGE_TAG"
             LOCAL_IMAGE=$(echo "$LOCAL_IMAGE" | tr '[:upper:]' '[:lower:]')
+            echo "Building self-hosted image with commit tag: $LOCAL_IMAGE"
             docker build -t "$LOCAL_IMAGE" .
             
             echo "$GITHUB_TOKEN" | docker login ghcr.io -u ${{ github.repository_owner }} --password-stdin

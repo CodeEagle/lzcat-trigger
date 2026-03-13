@@ -435,8 +435,6 @@ jobs:
           GHCR_USERNAME: ${{ secrets.GHCR_USERNAME }}
         run: |
           TARGET_REPO="${{ inputs.target_repo }}"
-          SOURCE_VERSION="${{ steps.get-version.outputs.source_version }}"
-          BUILD_VERSION="${{ steps.get-version.outputs.build_version }}"
           HEAD_SHA="${{ steps.wait-target-workflow.outputs.head_sha }}"
           FORCE_BUILD="${{ inputs.force_build }}"
           TARGET_VERSION="${{ inputs.target_version }}"
@@ -451,31 +449,15 @@ jobs:
           # 构造 ghcr.io 镜像地址
           OWNER=$(echo "$TARGET_REPO" | cut -d'/' -f1 | tr '[:upper:]' '[:lower:]')
           REPO=$(echo "$TARGET_REPO" | cut -d'/' -f2 | tr '[:upper:]' '[:lower:]')
-          TAG_CANDIDATES=()
-          if [ -n "$HEAD_SHA" ]; then
-            SHORT_SHA=$(echo "$HEAD_SHA" | cut -c1-12)
-            TAG_CANDIDATES+=("$SHORT_SHA")
+          if [ -z "$HEAD_SHA" ]; then
+            echo "Missing target workflow head SHA; cannot resolve self-built image tag"
+            exit 1
           fi
-          TAG_CANDIDATES+=("$SOURCE_VERSION")
-          if [ -n "$BUILD_VERSION" ] && [ "$BUILD_VERSION" != "$SOURCE_VERSION" ]; then
-            TAG_CANDIDATES+=("$BUILD_VERSION")
-          fi
-          if [[ "$SOURCE_VERSION" == v* ]]; then
-            TAG_CANDIDATES+=("${SOURCE_VERSION#v}")
-          else
-            TAG_CANDIDATES+=("v${SOURCE_VERSION}")
-          fi
-          if [ -n "$BUILD_VERSION" ]; then
-            if [[ "$BUILD_VERSION" == v* ]]; then
-              TAG_CANDIDATES+=("${BUILD_VERSION#v}")
-            else
-              TAG_CANDIDATES+=("v${BUILD_VERSION}")
-            fi
-          fi
-          
-          FIRST_TAG="${TAG_CANDIDATES[0]}"
+
+          FIRST_TAG=$(echo "$HEAD_SHA" | cut -c1-12)
+          TAG_CANDIDATES=("$FIRST_TAG")
           GHCR_IMAGE="ghcr.io/${OWNER}/${REPO}:${FIRST_TAG}"
-          echo "Copying image candidates for ${TARGET_REPO}: ${TAG_CANDIDATES[*]}"
+          echo "Copying self-built image for ${TARGET_REPO} using commit tag: ${FIRST_TAG}"
 
           EXISTING_ACCELERATED_URL=$(lzc-cli appstore my-images 2>&1 | grep "/${REPO}:${FIRST_TAG}" | grep -oE 'registry\.lazycat\.cloud/[a-zA-Z0-9_/.:-]+' | head -1 || echo "")
           CAN_REUSE_EXISTING="true"
