@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       target_repo:
-        description: "Target repository (leave empty to process all enabled repos)"
+        description: "Target repository, e.g. CodeEagle/Airi or CodeEagle__Airi (leave empty to process all enabled repos)"
         required: false
         default: ""
         type: string
