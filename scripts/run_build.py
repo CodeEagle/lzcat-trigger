@@ -518,6 +518,10 @@ def build_target_image(
             content = content.replace("{{SERVICE_PORT}}", str(config.get("service_port", "")))
             (source_root / "Dockerfile").write_text(content)
             copy_overlay_paths(repo_dir, source_root, overlay_paths)
+            # Run prepare_build_context.py if exists (for frontend API URL replacement)
+            prepare_script = source_root / "lazycat" / "prepare_build_context.py"
+            if prepare_script.exists():
+                sh(["python3", str(prepare_script), str(source_root)], env=env)
             return build_with_dockerfile(source_root, target_image, env, "Dockerfile", ".", build_args)
         dockerfile_path = source_root / "Dockerfile"
         if not dockerfile_path.exists():
